@@ -925,6 +925,22 @@ update_1folder (MailFolderCache *cache,
 	}
 }
 
+/* How many newly arrived messages in one folder change get their own
+   notification; any older ones are reported together as a count. */
+#define OMA_MAX_SINGLE_NEW_MAIL_NOTIFY 5
+
+static gint
+folder_cache_compare_date_received (gconstpointer aa,
+				    gconstpointer bb)
+{
+	CamelMessageInfo *info_a = *((CamelMessageInfo **) aa);
+	CamelMessageInfo *info_b = *((CamelMessageInfo **) bb);
+	gint64 date_a = camel_message_info_get_date_received (info_a);
+	gint64 date_b = camel_message_info_get_date_received (info_b);
+
+	return date_a < date_b ? -1 : (date_a > date_b ? 1 : 0);
+}
+
 #define IGNORE_THREAD_VALUE_TODO	GINT_TO_POINTER (1)
 #define IGNORE_THREAD_VALUE_IN_PROGRESS	GINT_TO_POINTER (2)
 #define IGNORE_THREAD_VALUE_DONE	GINT_TO_POINTER (3)
@@ -1062,7 +1078,7 @@ folder_cache_process_folder_changes_thread (CamelFolder *folder,
 	gint new = 0;
 	gint i;
 	guint32 flags;
-	gchar *uid = NULL, *sender = NULL, *subject = NULL;
+	GPtrArray *new_infos; /* CamelMessageInfo *, one per newly arrived message */
 
 	g_return_if_fail (CAMEL_IS_FOLDER (folder));
 	g_return_if_fail (changes != NULL);
@@ -1071,6 +1087,7 @@ folder_cache_process_folder_changes_thread (CamelFolder *folder,
 	full_name = camel_folder_get_full_name (folder);
 	parent_store = camel_folder_get_parent_store (folder);
 	session = camel_service_ref_session (CAMEL_SERVICE (parent_store));
+	new_infos = g_ptr_array_new_with_free_func (g_object_unref);
 
 	g_mutex_lock (&last_newmail_per_folder_mutex);
 	if (last_newmail_per_folder == NULL)
@@ -1133,19 +1150,9 @@ folder_cache_process_folder_changes_thread (CamelFolder *folder,
 					if (camel_message_info_get_date_received (info) > new_latest_received)
 						new_latest_received = camel_message_info_get_date_received (info);
 					new++;
-					if (new == 1) {
-						uid = g_strdup (camel_message_info_get_uid (info));
-						sender = g_strdup (camel_message_info_get_from (info));
-						subject = g_strdup (camel_message_info_get_subject (info));
-					} else {
-						g_free (uid);
-						g_free (sender);
-						g_free (subject);
-
-						uid = NULL;
-						sender = NULL;
-						subject = NULL;
-					}
+					/* Omarchy Mail: remember every new message, so each one
+					   can be announced with its own notification. */
+					g_ptr_array_add (new_infos, g_object_ref (info));
 				}
 
 				g_clear_object (&info);
@@ -1171,16 +1178,40 @@ folder_cache_process_folder_changes_thread (CamelFolder *folder,
 	folder_info = mail_folder_cache_ref_folder_info (
 		cache, parent_store, full_name);
 	if (folder_info != NULL) {
-		update_1folder (
-			cache, folder_info, new,
-			uid, sender, subject, NULL);
+		if (new_infos->len > 0) {
+			guint first_single, ii;
+
+			/* Oldest first, so the newest message ends up on top of the
+			   notification stack. A big burst (like the first sync after
+			   a long time offline) is summarized instead of flooding the
+			   screen: only the latest few get their own notification. */
+			g_ptr_array_sort (new_infos, folder_cache_compare_date_received);
+
+			first_single = new_infos->len > OMA_MAX_SINGLE_NEW_MAIL_NOTIFY ?
+				new_infos->len - OMA_MAX_SINGLE_NEW_MAIL_NOTIFY : 0;
+
+			if (first_single > 0)
+				update_1folder (cache, folder_info, first_single, NULL, NULL, NULL, NULL);
+
+			for (ii = first_single; ii < new_infos->len; ii++) {
+				CamelMessageInfo *new_info = g_ptr_array_index (new_infos, ii);
+
+				update_1folder (
+					cache, folder_info, 1,
+					camel_message_info_get_uid (new_info),
+					camel_message_info_get_from (new_info),
+					camel_message_info_get_subject (new_info),
+					NULL);
+			}
+		} else {
+			update_1folder (
+				cache, folder_info, new,
+				NULL, NULL, NULL, NULL);
+		}
 		folder_info_unref (folder_info);
 	}
 
-	g_free (uid);
-	g_free (sender);
-	g_free (subject);
-
+	g_ptr_array_unref (new_infos);
 	g_object_unref (session);
 }
 

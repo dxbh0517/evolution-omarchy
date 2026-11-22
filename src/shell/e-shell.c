@@ -74,6 +74,7 @@ struct _EShellPrivate {
 	guint ready_to_quit : 1;
 	guint safe_mode : 1;
 	guint activate_created_window : 1;
+	guint start_hidden : 1;
 };
 
 enum {
@@ -144,11 +145,40 @@ shell_window_removed_cb (EShell *shell)
 		e_shell_quit (shell, E_SHELL_QUIT_LAST_WINDOW);
 }
 
+/* Omarchy Mail keeps running in the background when its main window is
+ * closed, so new mail is still fetched and announced. Quit from the menu
+ * (Ctrl+Q) or "evolution --quit" ends the process. Set the environment
+ * variable OMARCHY_MAIL_QUIT_ON_CLOSE=1 to restore the upstream behaviour. */
+static gboolean
+shell_keep_running_in_background (void)
+{
+	const gchar *env = g_getenv ("OMARCHY_MAIL_QUIT_ON_CLOSE");
+
+	return !env || !*env || g_strcmp0 (env, "0") == 0;
+}
+
 static gboolean
 shell_window_delete_event_cb (GtkWindow *window,
                               GdkEvent *event,
                               GtkApplication *application)
 {
+	if (E_IS_SHELL_WINDOW (window) && shell_keep_running_in_background ()) {
+		GList *link;
+		guint n_shell_windows = 0;
+
+		for (link = gtk_application_get_windows (application); link; link = g_list_next (link)) {
+			if (E_IS_SHELL_WINDOW (link->data))
+				n_shell_windows++;
+		}
+
+		/* The last main window is only hidden; activating the
+		 * application (launching it again) shows it back. */
+		if (n_shell_windows == 1) {
+			gtk_widget_hide (GTK_WIDGET (window));
+			return TRUE;
+		}
+	}
+
 	/* If other windows are open we can safely close this one. */
 	if (g_list_length (gtk_application_get_windows (application)) > 1)
 		return FALSE;
@@ -2006,6 +2036,7 @@ static gboolean disable_preview = FALSE;
 static gboolean import_uris = FALSE;
 static gboolean view_uris = FALSE;
 static gboolean quit = FALSE;
+static gboolean start_in_background = FALSE;
 
 static gchar *geometry = NULL;
 static gchar *requested_view = NULL;
@@ -2054,6 +2085,8 @@ static GOptionEntry app_options[] = {
 	  N_("View URIs or filenames given as rest of arguments."), NULL },
 	{ "quit", 'q', 0, G_OPTION_ARG_NONE, &quit,
 	  N_("Request a running Evolution process to quit"), NULL },
+	{ "background", '\0', 0, G_OPTION_ARG_NONE, &start_in_background,
+	  N_("Start without showing a window, to check for new mail in the background; does nothing when already running"), NULL },
 	{ "version", 'v', G_OPTION_FLAG_HIDDEN | G_OPTION_FLAG_NO_ARG,
 	  G_OPTION_ARG_CALLBACK, option_version_cb, NULL, NULL },
 	{ G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_STRING_ARRAY,
@@ -2075,7 +2108,9 @@ handle_options_idle_cb (gpointer user_data)
 		if (e_shell_handle_uris (shell, uris, import_uris, view_uris) == 0)
 			g_application_quit (G_APPLICATION (shell));
 	} else {
+		shell->priv->start_hidden = start_in_background;
 		e_shell_create_shell_window (shell, requested_view);
+		shell->priv->start_hidden = FALSE;
 	}
 
 	shell->priv->started = TRUE;
@@ -2209,6 +2244,10 @@ e_shell_handle_local_options_cb (GApplication *application,
 	}
 
 	if (g_application_get_is_remote (application)) {
+		/* Already running; a background start should not pop up the window. */
+		if (start_in_background)
+			return 0;
+
 		g_application_activate (application);
 
 		if (remaining_args && *remaining_args)
@@ -2967,7 +3006,8 @@ e_shell_create_shell_window (EShell *shell,
 	g_free (shell->priv->geometry);
 	shell->priv->geometry = NULL;
 
-	gtk_widget_show (shell_window);
+	if (!shell->priv->start_hidden)
+		gtk_widget_show (shell_window);
 
 	if (g_list_length (gtk_application_get_windows (GTK_APPLICATION (shell))) == 1) {
 		/* It's the first window, process outstanding credential requests now */

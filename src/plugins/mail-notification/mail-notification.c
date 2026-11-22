@@ -21,6 +21,7 @@
 
 #include <time.h>
 
+#include "libemail-engine/libemail-engine.h"
 #include "mail/e-mail-account-store.h"
 #include "mail/e-mail-backend.h"
 #include "mail/e-mail-ui-session.h"
@@ -311,7 +312,29 @@ enable_dbus (gint enable)
 
 #ifdef HAVE_LIBNOTIFY
 
-static guint status_count = 0;
+/* Omarchy Mail: every new message gets its own notification, titled with
+ * the sender and showing the subject plus a short body preview. Large
+ * bursts are capped by the folder cache, which reports the older part of
+ * a burst as a single count ("N more new messages"). */
+
+#define OMA_PREVIEW_MAX_CHARS 160
+#define OMA_PREVIEW_WAIT_MS 2500
+
+typedef struct _MailNotifyItem {
+	gchar *key;		/* folder_uri "\n" msg_uid; msg_uid empty for a summary */
+	gchar *folder_uri;
+	gchar *msg_uid;		/* NULL for the "N more" summary */
+	gchar *title;
+	gchar *subject;
+	gchar *preview;
+	gchar *display_name;	/* folder display name, like "Inbox" */
+	guint extra_count;	/* summary only */
+	gboolean shown;
+	guint wait_id;		/* waiting for a preview before showing */
+	NotifyNotification *notification;
+} MailNotifyItem;
+
+static GHashTable *notify_items = NULL; /* gchar *key ~> MailNotifyItem * */
 static GHashTable *unread_messages_by_folder = NULL;
 
 #ifdef HAVE_LIBUNITY
@@ -329,17 +352,108 @@ update_unity_launcher_entry (void)
 }
 #endif
 
-static NotifyNotification *notify = NULL;
+static gchar *
+mail_notify_make_key (const gchar *folder_uri,
+		      const gchar *msg_uid)
+{
+	return g_strconcat (folder_uri ? folder_uri : "", "\n", msg_uid ? msg_uid : "", NULL);
+}
+
+static void
+mail_notify_item_free (gpointer ptr)
+{
+	MailNotifyItem *item = ptr;
+
+	if (!item)
+		return;
+
+	if (item->wait_id)
+		g_source_remove (item->wait_id);
+
+	if (item->notification) {
+		g_signal_handlers_disconnect_matched (item->notification, G_SIGNAL_MATCH_DATA, 0, 0, NULL, NULL, item);
+		g_object_unref (item->notification);
+	}
+
+	g_free (item->key);
+	g_free (item->folder_uri);
+	g_free (item->msg_uid);
+	g_free (item->title);
+	g_free (item->subject);
+	g_free (item->preview);
+	g_free (item->display_name);
+	g_slice_free (MailNotifyItem, item);
+}
+
+static void
+mail_notify_close_item (MailNotifyItem *item)
+{
+	g_return_if_fail (item != NULL);
+
+	if (item->notification && item->shown)
+		notify_notification_close (item->notification, NULL);
+
+	/* Frees the item */
+	g_hash_table_remove (notify_items, item->key);
+}
+
+static void
+mail_notify_close_by_uid (const gchar *folder_uri,
+			  const gchar *msg_uid)
+{
+	MailNotifyItem *item;
+	gchar *key;
+
+	if (!notify_items)
+		return;
+
+	key = mail_notify_make_key (folder_uri, msg_uid);
+	item = g_hash_table_lookup (notify_items, key);
+	if (item)
+		mail_notify_close_item (item);
+	g_free (key);
+}
+
+static gboolean
+mail_notify_close_key_idle_cb (gpointer user_data)
+{
+	const gchar *key = user_data;
+	MailNotifyItem *item;
+
+	item = notify_items ? g_hash_table_lookup (notify_items, key) : NULL;
+	if (item)
+		mail_notify_close_item (item);
+
+	return G_SOURCE_REMOVE;
+}
+
+/* For use from inside the notification's own action callbacks, where
+ * the notification object must stay alive until the callback returns. */
+static void
+mail_notify_close_by_uid_later (const gchar *folder_uri,
+				const gchar *msg_uid)
+{
+	g_idle_add_full (G_PRIORITY_DEFAULT_IDLE, mail_notify_close_key_idle_cb,
+		mail_notify_make_key (folder_uri, msg_uid), g_free);
+}
 
 static void
 remove_notification (void)
 {
-	if (notify)
-		notify_notification_close (notify, NULL);
+	if (notify_items) {
+		GList *items, *link;
 
-	notify = NULL;
+		items = g_hash_table_get_values (notify_items);
+		for (link = items; link; link = g_list_next (link)) {
+			MailNotifyItem *item = link->data;
 
-	status_count = 0;
+			if (item->notification && item->shown)
+				notify_notification_close (item->notification, NULL);
+		}
+		g_list_free (items);
+
+		g_hash_table_remove_all (notify_items);
+	}
 
 #ifdef HAVE_LIBUNITY
 	unread_message_count = 0;
@@ -347,19 +461,109 @@ remove_notification (void)
 #endif
 }
 
-static gboolean
-notification_callback (NotifyNotification *notification)
+static EMailSession *
+mail_notify_get_session (void)
 {
-	GError *error = NULL;
+	EShell *shell;
+	EShellBackend *backend;
 
-	notify_notification_show (notification, &error);
+	shell = e_shell_get_default ();
+	if (!shell)
+		return NULL;
 
-	if (error != NULL) {
-		g_warning ("%s", error->message);
-		g_error_free (error);
+	backend = e_shell_get_backend_by_name (shell, "mail");
+	if (!backend)
+		return NULL;
+
+	return e_mail_backend_get_session (E_MAIL_BACKEND (backend));
+}
+
+/* Returns a new reference on the already opened folder, if any; never blocks. */
+static CamelFolder *
+mail_notify_ref_open_folder (const gchar *folder_uri)
+{
+	EMailSession *session;
+	CamelStore *store = NULL;
+	CamelFolder *folder = NULL;
+	gchar *folder_name = NULL;
+
+	session = mail_notify_get_session ();
+	if (!session || !folder_uri)
+		return NULL;
+
+	if (e_mail_folder_uri_parse (CAMEL_SESSION (session), folder_uri, &store, &folder_name, NULL)) {
+		folder = mail_folder_cache_ref_folder (
+			e_mail_session_get_folder_cache (session), store, folder_name);
 	}
 
-	return FALSE;
+	g_clear_object (&store);
+	g_free (folder_name);
+
+	return folder;
+}
+
+static gchar *
+mail_notify_sender_title (const gchar *msg_sender)
+{
+	CamelInternetAddress *address;
+	const gchar *name = NULL, *email = NULL;
+	gchar *title = NULL;
+
+	if (!msg_sender || !*msg_sender)
+		return g_strdup (_("New message"));
+
+	address = camel_internet_address_new ();
+	if (camel_address_unformat (CAMEL_ADDRESS (address), msg_sender) > 0 &&
+	    camel_internet_address_get (address, 0, &name, &email)) {
+		if (name && *name)
+			title = g_strdup (name);
+		else if (email && *email)
+			title = g_strdup (email);
+	}
+	g_object_unref (address);
+
+	return title ? title : g_strdup (msg_sender);
+}
+
+/* Collapses whitespace and limits the length, so the preview reads as one
+ * or two tidy lines in the notification. */
+static gchar *
+mail_notify_tidy_preview (const gchar *text)
+{
+	GString *tidy;
+	const gchar *ptr;
+	gboolean last_space = TRUE;
+
+	if (!text || !*text || !g_utf8_validate (text, -1, NULL))
+		return NULL;
+
+	tidy = g_string_sized_new (OMA_PREVIEW_MAX_CHARS + 8);
+
+	for (ptr = text; *ptr && g_utf8_strlen (tidy->str, -1) < OMA_PREVIEW_MAX_CHARS; ptr = g_utf8_next_char (ptr)) {
+		gunichar chr = g_utf8_get_char (ptr);
+
+		if (g_unichar_isspace (chr) || chr == 0x00A0 || chr == 0x200B || chr == 0x034F) {
+			if (!last_space)
+				g_string_append_c (tidy, ' ');
+			last_space = TRUE;
+		} else if (!g_unichar_iscntrl (chr)) {
+			g_string_append_unichar (tidy, chr);
+			last_space = FALSE;
+		}
+	}
+
+	while (tidy->len > 0 && tidy->str[tidy->len - 1] == ' ')
+		g_string_truncate (tidy, tidy->len - 1);
+
+	if (*ptr && tidy->len > 0)
+		g_string_append (tidy, "…");
+
+	if (!tidy->len) {
+		g_string_free (tidy, TRUE);
+		return NULL;
+	}
+
+	return g_string_free (tidy, FALSE);
 }
 
 /* -------------------------------------------------------------------  */
@@ -369,16 +573,19 @@ typedef struct _NotifyDefaultActionData NotifyDefaultActionData;
 struct _NotifyDefaultActionData {
 	gchar *folder_uri;
 	gchar *msg_uid;
+	guint32 set_flags;
 };
 
 static NotifyDefaultActionData *
 notify_default_action_data_new (const gchar *folder_uri,
-                                const gchar *msg_uid)
+                                const gchar *msg_uid,
+				guint32 set_flags)
 {
 	NotifyDefaultActionData *result;
 	result = g_slice_new (NotifyDefaultActionData);
 	result->folder_uri = g_strdup (folder_uri);
 	result->msg_uid = g_strdup (msg_uid);
+	result->set_flags = set_flags;
 	return result;
 }
 
@@ -405,6 +612,11 @@ notify_default_action_cb (NotifyNotification *notification,
 	EUIAction *action;
 	GtkApplication *application;
 	GList *list, *fallback = NULL;
+	gchar *folder_uri, *msg_uid;
+
+	/* The data is freed together with the notification below. */
+	folder_uri = g_strdup (data->folder_uri);
+	msg_uid = g_strdup (data->msg_uid);
 
 	shell = e_shell_get_default ();
 	application = GTK_APPLICATION (shell);
@@ -427,11 +639,22 @@ notify_default_action_cb (NotifyNotification *notification,
 		list = fallback;
 
 	if (!list) {
+		/* Running in the background without any window yet. */
+		e_shell_create_shell_window (shell, "mail");
+		list = gtk_application_get_windows (application);
+		while (list && !E_IS_SHELL_WINDOW (list->data))
+			list = g_list_next (list);
+	}
+
+	if (!list) {
 		g_warn_if_reached ();
+		g_free (folder_uri);
+		g_free (msg_uid);
 		return;
 	}
 
-	/* Present the shell window. */
+	/* Present the shell window (this also shows a window hidden
+	 * by running in the background). */
 	shell_window = E_SHELL_WINDOW (list->data);
 	gtk_window_present (GTK_WINDOW (shell_window));
 
@@ -440,12 +663,13 @@ notify_default_action_cb (NotifyNotification *notification,
 	action = e_shell_view_get_switcher_action (shell_view);
 	e_ui_action_set_active (action, TRUE);
 
-	/* Select the latest folder with new mail. */
+	/* Select the folder with the new mail. */
 	shell_sidebar = e_shell_view_get_shell_sidebar (shell_view);
 	g_object_get (shell_sidebar, "folder-tree", &folder_tree, NULL);
-	em_folder_tree_set_selected (folder_tree, data->folder_uri, FALSE);
+	em_folder_tree_set_selected (folder_tree, folder_uri, FALSE);
+	g_clear_object (&folder_tree);
 
-	if (data->msg_uid) {
+	if (msg_uid) {
 		EMailView *mail_view = NULL;
 
 		g_object_get (e_shell_view_get_shell_content (shell_view), "mail-view", &mail_view, NULL);
@@ -454,13 +678,16 @@ notify_default_action_cb (NotifyNotification *notification,
 
 			/* Select the message. */
 			message_list = MESSAGE_LIST (e_mail_reader_get_message_list (E_MAIL_READER (mail_view)));
-			message_list_select_uid (message_list, data->msg_uid, TRUE);
+			message_list_select_uid (message_list, msg_uid, TRUE);
 
 			g_clear_object (&mail_view);
 		}
 	}
 
-	remove_notification ();
+	mail_notify_close_by_uid_later (folder_uri, msg_uid);
+
+	g_free (folder_uri);
+	g_free (msg_uid);
 }
 
 static void
@@ -484,7 +711,7 @@ uri_to_folder_cb (GObject *source_object,
 	        return;
 	}
 
-	camel_folder_set_message_flags (folder, data->msg_uid, CAMEL_MESSAGE_SEEN, CAMEL_MESSAGE_SEEN);
+	camel_folder_set_message_flags (folder, data->msg_uid, data->set_flags, data->set_flags);
 
 	g_object_unref (folder);
 
@@ -492,28 +719,22 @@ uri_to_folder_cb (GObject *source_object,
 }
 
 static void
-notify_mark_as_read_action_cb (NotifyNotification *notification,
-                               gchar *action,
-                               gpointer user_data)
+notify_set_flags_action_cb (NotifyNotification *notification,
+			    gchar *action,
+			    gpointer user_data)
 {
 	NotifyDefaultActionData *data = user_data;
 	NotifyDefaultActionData *async_data;
-	EShell *shell;
-	EShellBackend *backend;
-	EMailBackend *mail_backend;
 	EMailSession *session;
 
 	if (!data || !data->folder_uri || !data->msg_uid)
 		return;
 
-	shell = e_shell_get_default ();
-	backend = e_shell_get_backend_by_name (shell, "mail");
-	if (!backend)
+	session = mail_notify_get_session ();
+	if (!session)
 		return;
 
-	mail_backend = E_MAIL_BACKEND (backend);
-	session = e_mail_backend_get_session (mail_backend);
-	async_data = notify_default_action_data_new (data->folder_uri, data->msg_uid);
+	async_data = notify_default_action_data_new (data->folder_uri, data->msg_uid, data->set_flags);
 	e_mail_session_uri_to_folder (
 		session,
 		async_data->folder_uri,
@@ -523,7 +744,7 @@ notify_mark_as_read_action_cb (NotifyNotification *notification,
 		uri_to_folder_cb,
 		async_data);
 
-	remove_notification ();
+	mail_notify_close_by_uid_later (async_data->folder_uri, async_data->msg_uid);
 }
 
 /* Check if actions are supported by the notification daemon.
@@ -555,138 +776,261 @@ can_support_actions (void)
 }
 
 static void
-new_notify_status (EMEventTargetFolder *t)
+mail_notify_notification_closed_cb (NotifyNotification *notification,
+				    gpointer user_data)
 {
-	gchar *escaped_text;
-	GString *text;
-	const gchar *summary;
-	const gchar *icon_name;
+	MailNotifyItem *item = user_data;
 
-	status_count += t->new;
+	/* Dismissed by the user or expired; forget it. */
+	if (notify_items && g_hash_table_lookup (notify_items, item->key) == item)
+		g_hash_table_remove (notify_items, item->key);
+}
 
-	text = g_string_sized_new (256);
+static void
+mail_notify_item_update (MailNotifyItem *item)
+{
+	GString *body;
+	const gchar *icon_name = "org.omarchy.Mail";
 
-	g_string_append_printf (text, ngettext (
-		/* Translators: '%d' is the count of mails received. */
-		"You have received %d new message.",
-		"You have received %d new messages.",
-		status_count), status_count);
+	body = g_string_sized_new (256);
 
-	if (t->msg_sender) {
-		g_string_append_c (text, '\n');
+	if (item->msg_uid) {
+		if (item->subject && *item->subject) {
+			gchar *escaped = g_markup_escape_text (item->subject, -1);
+			g_string_append_printf (body, "<b>%s</b>", escaped);
+			g_free (escaped);
+		} else {
+			g_string_append (body, _("(No Subject)"));
+		}
 
-		/* Translators: "From:" is preceding a new mail
-		 * sender address, like "From: user@example.com" */
-		g_string_append_printf (text, _("From: %s"), t->msg_sender);
+		if (item->preview && *item->preview) {
+			gchar *escaped = g_markup_escape_text (item->preview, -1);
+			g_string_append_c (body, '\n');
+			g_string_append (body, escaped);
+			g_free (escaped);
+		}
+	} else if (item->display_name) {
+		gchar *escaped = g_markup_escape_text (item->display_name, -1);
+		g_string_append_printf (body, _("In %s"), escaped);
+		g_free (escaped);
 	}
 
-	if (t->msg_subject) {
-		g_string_append_c (text, '\n');
+	if (!notify_is_initted () && !notify_init ("evolution-mail-notification"))
+		g_warning ("%s: notify init error", G_STRFUNC);
 
-		/* Translators: "Subject:" is preceding a new mail
-		 * subject, like "Subject: It happened again" */
-		g_string_append_printf (text, _("Subject: %s"), t->msg_subject);
-	}
-
-	if (t->full_display_name) {
-		g_string_append_c (text, '\n');
-
-		/* Translators: The '%s' is replaced by the folder name, where a new
-		 * mail message arrived. Example: "Folder: On This Computer : Inbox" */
-		g_string_append_printf (text, _("Folder: %s"), t->full_display_name);
-	}
-
-	if (status_count > 1 && (t->msg_sender || t->msg_subject)) {
-		guint additional_messages = status_count - 1;
-
-		g_string_append_c (text, '\n');
-
-		g_string_append_printf (text, ngettext (
-			/* Translators: %d is the count of mails received in addition
-			 * to the one displayed in this notification. */
-			"(and %d more)",
-			"(and %d more)",
-			additional_messages), additional_messages);
-	}
-
-	if (e_util_is_running_flatpak ())
-		icon_name = "org.gnome.Evolution";
-	else
-		icon_name = "evolution";
-
-	summary = _("New email in Evolution");
-	escaped_text = g_markup_escape_text (text->str, -1);
-
-	if (notify) {
-		notify_notification_update (
-			notify, summary, escaped_text, icon_name);
+	if (item->notification) {
+		notify_notification_update (item->notification, item->title, body->str, icon_name);
 	} else {
-		if (!notify_init ("evolution-mail-notification"))
-			fprintf (stderr,"notify init error");
+		item->notification = notify_notification_new (item->title, body->str, icon_name);
 
-		notify = notify_notification_new (
-			summary, escaped_text, icon_name);
-
-		notify_notification_set_urgency (
-			notify, NOTIFY_URGENCY_NORMAL);
-
-		notify_notification_set_timeout (
-			notify, NOTIFY_EXPIRES_DEFAULT);
-
+		notify_notification_set_urgency (item->notification, NOTIFY_URGENCY_NORMAL);
+		notify_notification_set_timeout (item->notification, NOTIFY_EXPIRES_DEFAULT);
+		notify_notification_set_app_name (item->notification, _("Mail"));
 		notify_notification_set_hint (
-			notify, "desktop-entry",
-			g_variant_new_string ("org.gnome.Evolution"));
+			item->notification, "desktop-entry",
+			g_variant_new_string ("org.omarchy.Mail"));
+		notify_notification_set_category (item->notification, "email.arrived");
 
 		if (e_util_is_running_gnome ()) {
 			notify_notification_set_hint (
-				notify, "sound-name",
+				item->notification, "sound-name",
 				g_variant_new_string ("message-new-email"));
 		}
-	}
 
-	/* Check if actions are supported */
-	if (can_support_actions ()) {
-		gchar *label;
-		NotifyDefaultActionData *data;
+		g_signal_connect (item->notification, "closed",
+			G_CALLBACK (mail_notify_notification_closed_cb), item);
 
-		/* NotifyAction takes ownership. */
-		data = notify_default_action_data_new (t->folder_name, t->msg_uid);
-
-		label = g_strdup_printf (
-			/* Translators: The '%s' is a mail
-			 * folder name.  (e.g. "Show Inbox") */
-			_("Show %s"), t->display_name);
-
-		notify_notification_clear_actions (notify);
-		notify_notification_add_action (
-			notify, "default", label,
-			notify_default_action_cb,
-			data,
-			notify_default_action_free_cb);
-
-		if (t->msg_uid && t->folder_name && status_count == 1) {
-			NotifyDefaultActionData *mark_data;
-
-			mark_data = notify_default_action_data_new (t->folder_name, t->msg_uid);
+		if (can_support_actions ()) {
 			notify_notification_add_action (
-				notify,
-				"mark-read",
-				_("Mark as read"),
-				notify_mark_as_read_action_cb,
-				mark_data,
+				item->notification, "default", _("Open"),
+				notify_default_action_cb,
+				notify_default_action_data_new (item->folder_uri, item->msg_uid, 0),
 				notify_default_action_free_cb);
+
+			if (item->msg_uid) {
+				notify_notification_add_action (
+					item->notification, "mark-read", _("Mark as Read"),
+					notify_set_flags_action_cb,
+					notify_default_action_data_new (item->folder_uri, item->msg_uid,
+						CAMEL_MESSAGE_SEEN),
+					notify_default_action_free_cb);
+
+				notify_notification_add_action (
+					item->notification, "delete", _("Delete"),
+					notify_set_flags_action_cb,
+					notify_default_action_data_new (item->folder_uri, item->msg_uid,
+						CAMEL_MESSAGE_SEEN | CAMEL_MESSAGE_DELETED),
+					notify_default_action_free_cb);
+			}
 		}
-		g_free (label);
 	}
 
-	g_idle_add_full (
-		G_PRIORITY_DEFAULT_IDLE,
-		(GSourceFunc) notification_callback,
-		g_object_ref (notify),
-		(GDestroyNotify) g_object_unref);
+	g_string_free (body, TRUE);
+}
 
-	g_free (escaped_text);
-	g_string_free (text, TRUE);
+static void
+mail_notify_item_show (MailNotifyItem *item)
+{
+	GError *error = NULL;
+
+	if (item->wait_id) {
+		g_source_remove (item->wait_id);
+		item->wait_id = 0;
+	}
+
+	mail_notify_item_update (item);
+
+	if (!notify_notification_show (item->notification, &error)) {
+		g_warning ("%s: %s", G_STRFUNC, error ? error->message : "Unknown error");
+		g_clear_error (&error);
+	} else {
+		item->shown = TRUE;
+	}
+}
+
+static gboolean
+mail_notify_preview_wait_cb (gpointer user_data)
+{
+	MailNotifyItem *item = user_data;
+
+	/* The body is taking long to download; show what is known now,
+	 * the preview is filled in when it arrives. */
+	item->wait_id = 0;
+	mail_notify_item_show (item);
+
+	return G_SOURCE_REMOVE;
+}
+
+static void
+mail_notify_got_message_cb (GObject *source_object,
+			    GAsyncResult *result,
+			    gpointer user_data)
+{
+	gchar *key = user_data;
+	CamelMimeMessage *message;
+	MailNotifyItem *item;
+
+	message = camel_folder_get_message_finish (CAMEL_FOLDER (source_object), result, NULL);
+	item = notify_items ? g_hash_table_lookup (notify_items, key) : NULL;
+
+	if (item) {
+		if (message) {
+			gchar *preview;
+
+			preview = camel_mime_part_generate_preview (CAMEL_MIME_PART (message), NULL, NULL);
+			g_free (item->preview);
+			item->preview = mail_notify_tidy_preview (preview);
+			g_free (preview);
+		}
+
+		if (!item->shown) {
+			mail_notify_item_show (item);
+		} else if (item->preview) {
+			/* Shown already (the download was slow); refresh in place. */
+			mail_notify_item_show (item);
+		}
+	}
+
+	g_clear_object (&message);
+	g_free (key);
+}
+
+static void
+mail_notify_new_message (EMEventTargetFolder *t)
+{
+	MailNotifyItem *item;
+	CamelFolder *folder;
+	gchar *key;
+
+	key = mail_notify_make_key (t->folder_name, t->msg_uid);
+
+	/* Already announced */
+	if (g_hash_table_contains (notify_items, key)) {
+		g_free (key);
+		return;
+	}
+
+	item = g_slice_new0 (MailNotifyItem);
+	item->key = key;
+	item->folder_uri = g_strdup (t->folder_name);
+	item->msg_uid = g_strdup (t->msg_uid);
+	item->title = mail_notify_sender_title (t->msg_sender);
+	item->subject = g_strdup (t->msg_subject);
+	item->display_name = g_strdup (t->display_name);
+
+	g_hash_table_insert (notify_items, item->key, item);
+
+	folder = mail_notify_ref_open_folder (t->folder_name);
+	if (folder) {
+		CamelMessageInfo *info;
+
+		info = camel_folder_get_message_info (folder, t->msg_uid);
+		if (info) {
+			item->preview = mail_notify_tidy_preview (camel_message_info_get_preview (info));
+			g_object_unref (info);
+		}
+
+		if (!item->preview) {
+			/* Download the message to build a preview, but do not keep
+			 * the notification waiting for it for long. */
+			item->wait_id = e_named_timeout_add (
+				OMA_PREVIEW_WAIT_MS, mail_notify_preview_wait_cb, item);
+
+			camel_folder_get_message (
+				folder, t->msg_uid, G_PRIORITY_DEFAULT, NULL,
+				mail_notify_got_message_cb, g_strdup (item->key));
+		}
+
+		g_object_unref (folder);
+	}
+
+	if (!item->wait_id)
+		mail_notify_item_show (item);
+}
+
+static void
+mail_notify_new_summary (EMEventTargetFolder *t)
+{
+	MailNotifyItem *item;
+	gchar *key;
+
+	key = mail_notify_make_key (t->folder_name, NULL);
+	item = g_hash_table_lookup (notify_items, key);
+
+	if (item) {
+		g_free (key);
+	} else {
+		item = g_slice_new0 (MailNotifyItem);
+		item->key = key;
+		item->folder_uri = g_strdup (t->folder_name);
+		item->display_name = g_strdup (t->display_name);
+
+		g_hash_table_insert (notify_items, item->key, item);
+	}
+
+	item->extra_count += t->new;
+
+	g_free (item->title);
+	item->title = g_strdup_printf (ngettext (
+		/* Translators: '%d' is the count of further new mails, besides
+		 * those which got their own notification. */
+		"%d more new message",
+		"%d more new messages",
+		item->extra_count), item->extra_count);
+
+	mail_notify_item_show (item);
+}
+
+static void
+new_notify_status (EMEventTargetFolder *t)
+{
+	if (!notify_items)
+		notify_items = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, mail_notify_item_free);
+
+	if (t->new == 1 && t->msg_uid)
+		mail_notify_new_message (t);
+	else
+		mail_notify_new_summary (t);
 }
 
 static void
@@ -701,10 +1045,44 @@ unread_notify_status (EMEventTargetFolderUnread *t)
 	lookup = g_hash_table_lookup (unread_messages_by_folder, t->folder_uri);
 	old_unread = lookup == NULL ? 0 : GPOINTER_TO_UINT (lookup);
 
-	/* Infer that a message has been read by a decrease in the number of unread
-	 * messages in a folder. */
-	if (t->unread < old_unread)
-		remove_notification ();
+	/* Some message in the folder was read or removed: dismiss the
+	 * notifications of those messages which are not new anymore. */
+	if (t->unread < old_unread && notify_items) {
+		CamelFolder *folder;
+		GList *items, *link;
+
+		folder = mail_notify_ref_open_folder (t->folder_uri);
+		items = g_hash_table_get_values (notify_items);
+
+		for (link = items; link; link = g_list_next (link)) {
+			MailNotifyItem *item = link->data;
+			CamelMessageInfo *info;
+			gboolean still_new = FALSE;
+
+			if (g_strcmp0 (item->folder_uri, t->folder_uri) != 0)
+				continue;
+
+			if (!item->msg_uid) {
+				if (t->unread == 0)
+					mail_notify_close_item (item);
+				continue;
+			}
+
+			info = folder ? camel_folder_get_message_info (folder, item->msg_uid) : NULL;
+			if (info) {
+				guint32 flags = camel_message_info_get_flags (info);
+
+				still_new = (flags & (CAMEL_MESSAGE_SEEN | CAMEL_MESSAGE_DELETED)) == 0;
+				g_object_unref (info);
+			}
+
+			if (!still_new && (folder || t->unread == 0))
+				mail_notify_close_item (item);
+		}
+
+		g_list_free (items);
+		g_clear_object (&folder);
+	}
 #ifdef HAVE_LIBUNITY
 	else if (t->is_inbox) {
 		unread_message_count += t->unread - old_unread;
@@ -724,7 +1102,15 @@ unread_notify_status (EMEventTargetFolderUnread *t)
 static void
 read_notify_status (EMEventTargetMessage *t)
 {
-	remove_notification ();
+	gchar *folder_uri;
+
+	if (!t->folder || !t->uid)
+		return;
+
+	/* The message is being shown; its notification is not needed anymore. */
+	folder_uri = e_mail_folder_uri_from_folder (t->folder);
+	mail_notify_close_by_uid (folder_uri, t->uid);
+	g_free (folder_uri);
 }
 #endif
 
@@ -1464,6 +1850,10 @@ e_plugin_lib_enable (EPlugin *ep,
 	} else {
 		enable_dbus (enable);
 		enable_sound (enable);
+
+#ifdef HAVE_LIBNOTIFY
+		remove_notification ();
+#endif
 
 		g_mutex_lock (&mlock);
 
