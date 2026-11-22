@@ -7373,6 +7373,30 @@ exit:
 	g_free (tmp_search_copy);
 }
 
+/* Omarchy: the UID of the message shown at the given view row, or NULL. */
+gchar *
+message_list_dup_uid_at_row (MessageList *message_list,
+			     gint view_row)
+{
+	ETreeTableAdapter *adapter;
+	GNode *node;
+
+	g_return_val_if_fail (IS_MESSAGE_LIST (message_list), NULL);
+
+	if (view_row < 0)
+		return NULL;
+
+	adapter = e_tree_get_table_adapter (E_TREE (message_list));
+	if (!adapter || view_row >= e_table_model_row_count (E_TABLE_MODEL (adapter)))
+		return NULL;
+
+	node = (GNode *) e_tree_table_adapter_node_at_row (adapter, view_row);
+	if (!node || !node->data)
+		return NULL;
+
+	return g_strdup (camel_message_info_get_uid (node->data));
+}
+
 gboolean
 message_list_contains_uid (MessageList *message_list,
 			   const gchar *uid)

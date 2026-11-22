@@ -2068,11 +2068,17 @@ eti_draw (GnomeCanvasItem *item,
 
 			eti_get_cell_background_color (eti, row, col, col_selected, &background);
 
-			/* Mail list (one composite column): selection is an inset rounded card. */
-			if (selected && e_table_header_count (eti->header) == 1 &&
+			/* Mail list (one composite column): selection is an inset rounded card;
+			 * the row under the pointer gets a quieter card of the same shape, so
+			 * its quick actions read as part of the row. */
+			if ((selected || GPOINTER_TO_INT (g_object_get_data (G_OBJECT (eti), "oma-hover-row")) == row + 1) &&
+			    e_table_header_count (eti->header) == 1 &&
 			    g_strcmp0 (gtk_widget_get_name (gtk_widget_get_parent (canvas)), "omamail-message-list") == 0) {
 				GdkRGBA base;
 				gdouble rx = x1 + 8, ry = y1 + 3, rw = ecol->width - 16, rh = height - 7, r = 8;
+
+				if (!selected)
+					e_utils_get_theme_color (canvas, "oma_mail_hover", "#1f2335", &background);
 
 				e_utils_get_theme_color (canvas, "theme_base_color", E_UTILS_DEFAULT_THEME_BASE_COLOR, &base);
 				cairo_save (cr);
@@ -2430,6 +2436,15 @@ eti_event (GnomeCanvasItem *item,
 	gdk_event_get_keyval (event, &event_keyval);
 	gdk_event_get_state (event, &event_state);
 	event_time = gdk_event_get_time (event);
+
+	/* Omarchy Mail "Select" mode: a plain primary click toggles the row in
+	 * the selection, as if Ctrl was held. Shift still extends a range. */
+	if (event_button == GDK_BUTTON_PRIMARY && eti->selection &&
+	    (gdk_event_get_event_type (event) == GDK_BUTTON_PRESS ||
+	     gdk_event_get_event_type (event) == GDK_BUTTON_RELEASE) &&
+	    (event_state & GDK_SHIFT_MASK) == 0 &&
+	    g_object_get_data (G_OBJECT (eti->selection), "oma-toggle-select"))
+		event_state |= GDK_CONTROL_MASK;
 
 	switch (gdk_event_get_event_type (event)) {
 	case GDK_BUTTON_PRESS: {

@@ -6,6 +6,7 @@
 #include "evolution-config.h"
 
 #include "mail/e-mail-folder-sort-order-dialog.h"
+#include "mail/e-mail-paned-view.h"
 #include "e-mail-shell-view-private.h"
 
 #include "e-mail-shell-view-actions.h"
@@ -21,6 +22,21 @@ action_oma_unread_filter_cb (EUIAction *action,
 	e_ui_action_set_state (action, parameter);
 	e_action_combo_box_set_current_value (combo, g_variant_get_boolean (parameter) ?
 		MAIL_FILTER_UNREAD_MESSAGES : MAIL_FILTER_ALL_MESSAGES);
+}
+
+static void
+action_oma_select_mode_cb (EUIAction *action,
+			   GVariant *parameter,
+			   gpointer user_data)
+{
+	EMailShellView *view = user_data;
+	EMailView *mail_view;
+
+	e_ui_action_set_state (action, parameter);
+
+	mail_view = e_mail_shell_content_get_mail_view (view->priv->mail_shell_content);
+	if (E_IS_MAIL_PANED_VIEW (mail_view))
+		e_mail_paned_view_set_select_mode (E_MAIL_PANED_VIEW (mail_view), g_variant_get_boolean (parameter));
 }
 
 static void
@@ -1878,6 +1894,10 @@ e_mail_shell_view_actions_init (EMailShellView *mail_shell_view)
 		{ "oma-unread-filter", "oma-mail-filter", N_("Unread"), NULL,
 		  N_("Show only unread messages; click again to show all messages"),
 		  NULL, NULL, "false", action_oma_unread_filter_cb },
+
+		{ "oma-select-mode", "selection-mode-symbolic", N_("Select"), NULL,
+		  N_("Pick several messages with single clicks, then mark them read or unread, flag, move, archive or delete them together"),
+		  NULL, NULL, "false", action_oma_select_mode_cb },
 
 		{ "mail-preview",
 		  NULL,

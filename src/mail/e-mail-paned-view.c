@@ -17,6 +17,7 @@
 #include "e-mail-reader-utils.h"
 
 #include "e-mail-paned-view.h"
+#include <libgnomecanvas/libgnomecanvas.h>
 
 #define E_SHELL_WINDOW_ACTION_GROUP_MAIL(window) \
 	E_SHELL_WINDOW_ACTION_GROUP ((window), "mail")
@@ -46,6 +47,24 @@ struct _EMailPanedViewPrivate {
 	gboolean preview_toolbar_visible;
 	guint responsive_idle;
 	gboolean responsive_stacked;
+
+	/* Omarchy quick selection */
+	GtkWidget *list_overlay;
+	GtkWidget *selection_revealer;
+	GtkWidget *selection_label;
+	GtkWidget *selection_actions;
+	gboolean select_mode;
+
+	/* Omarchy per-row quick actions, shown on the hovered message */
+	GtkWidget *row_actions;
+	GtkWidget *row_read_button;
+	GtkWidget *row_read_image;
+	GtkWidget *row_flag_button;
+	gchar *row_uid;
+	gint row_index;
+	GdkRectangle row_rect;	/* in list_overlay coordinates */
+	gboolean row_pointer_inside;
+	guint row_hide_id;
 };
 
 enum {
@@ -439,6 +458,736 @@ mail_paned_view_responsive_size_allocate_cb (GtkWidget *widget,
 			mail_paned_view_responsive_idle_cb, g_object_ref (self), g_object_unref);
 }
 
+/* —— Omarchy quick selection ——
+ * A floating bar at the bottom of the message list, shown while several
+ * messages are selected or while "Select" mode is on. In "Select" mode a
+ * plain click toggles a message in or out of the selection, like a
+ * checkbox, so a batch can be picked without holding Ctrl. */
+
+static void
+mail_paned_view_update_selection_bar (EMailPanedView *self)
+{
+	gint count;
+	gchar *text;
+
+	if (!self->priv->selection_revealer || !self->priv->message_list)
+		return;
+
+	count = message_list_selected_count (MESSAGE_LIST (self->priv->message_list));
+
+	if (count > 0)
+		text = g_strdup_printf (ngettext ("%d selected", "%d selected", count), count);
+	else
+		text = g_strdup (_("Select messages"));
+
+	gtk_label_set_text (GTK_LABEL (self->priv->selection_label), text);
+	gtk_widget_set_sensitive (self->priv->selection_actions, count > 0);
+	gtk_revealer_set_reveal_child (GTK_REVEALER (self->priv->selection_revealer),
+		self->priv->select_mode || count > 1);
+
+	g_free (text);
+}
+
+static void
+mail_paned_view_selection_change_cb (ETree *tree,
+				     gpointer user_data)
+{
+	EMailPanedView *self = E_MAIL_PANED_VIEW (user_data);
+
+	mail_paned_view_update_selection_bar (self);
+
+	if (self->priv->row_actions && self->priv->row_index >= 0) {
+		GtkStyleContext *context = gtk_widget_get_style_context (self->priv->row_actions);
+
+		if (e_selection_model_is_row_selected (e_tree_get_selection_model (tree), self->priv->row_index))
+			gtk_style_context_add_class (context, "oma-on-selected");
+		else
+			gtk_style_context_remove_class (context, "oma-on-selected");
+	}
+}
+
+static void
+mail_paned_view_selection_action_clicked_cb (GtkButton *button,
+					     gpointer user_data)
+{
+	EMailPanedView *self = E_MAIL_PANED_VIEW (user_data);
+	const gchar *action_name;
+	EUIAction *action;
+
+	action_name = g_object_get_data (G_OBJECT (button), "oma-action-name");
+	action = action_name ? e_mail_reader_get_action (E_MAIL_READER (self), action_name) : NULL;
+
+	if (action && e_ui_action_get_sensitive (action))
+		g_action_activate (G_ACTION (action), NULL);
+
+	mail_paned_view_update_selection_bar (self);
+}
+
+static void
+mail_paned_view_select_all_clicked_cb (GtkButton *button,
+				       gpointer user_data)
+{
+	EMailPanedView *self = E_MAIL_PANED_VIEW (user_data);
+
+	message_list_select_all (MESSAGE_LIST (self->priv->message_list));
+	gtk_widget_grab_focus (self->priv->message_list);
+}
+
+static void
+mail_paned_view_selection_done_clicked_cb (GtkButton *button,
+					   gpointer user_data)
+{
+	EMailPanedView *self = E_MAIL_PANED_VIEW (user_data);
+	ESelectionModel *selection;
+	EShellView *shell_view;
+	EUIAction *action = NULL;
+	gint cursor_row;
+
+	/* Keep only the message under the cursor selected. */
+	selection = e_tree_get_selection_model (E_TREE (self->priv->message_list));
+	cursor_row = e_selection_model_cursor_row (selection);
+	if (cursor_row >= 0)
+		e_selection_model_select_single_row (selection, cursor_row);
+	else
+		e_selection_model_clear (selection);
+
+	shell_view = e_mail_view_get_shell_view (E_MAIL_VIEW (self));
+	if (shell_view)
+		action = e_shell_view_get_action (shell_view, "oma-select-mode");
+
+	if (action && e_ui_action_get_active (action))
+		g_action_change_state (G_ACTION (action), g_variant_new_boolean (FALSE));
+	else
+		e_mail_paned_view_set_select_mode (self, FALSE);
+}
+
+static GtkWidget *
+mail_paned_view_selection_button (EMailPanedView *self,
+				  const gchar *icon_name,
+				  const gchar *label,
+				  const gchar *tooltip,
+				  const gchar *action_name)
+{
+	GtkWidget *button, *box, *widget;
+
+	button = gtk_button_new ();
+	gtk_button_set_relief (GTK_BUTTON (button), GTK_RELIEF_NONE);
+	gtk_widget_set_tooltip_text (button, tooltip);
+	gtk_widget_set_can_focus (button, FALSE);
+
+	box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+	gtk_container_add (GTK_CONTAINER (button), box);
+
+	widget = gtk_image_new_from_icon_name (icon_name, GTK_ICON_SIZE_BUTTON);
+	gtk_box_pack_start (GTK_BOX (box), widget, FALSE, FALSE, 0);
+
+	if (label) {
+		widget = gtk_label_new (label);
+		gtk_box_pack_start (GTK_BOX (box), widget, FALSE, FALSE, 0);
+	}
+
+	gtk_widget_show_all (button);
+
+	if (action_name) {
+		g_object_set_data (G_OBJECT (button), "oma-action-name", (gpointer) action_name);
+		g_signal_connect (button, "clicked",
+			G_CALLBACK (mail_paned_view_selection_action_clicked_cb), self);
+	}
+
+	return button;
+}
+
+static void
+mail_paned_view_build_selection_bar (EMailPanedView *self)
+{
+	GtkWidget *revealer, *bar, *actions, *widget;
+
+	revealer = gtk_revealer_new ();
+	gtk_revealer_set_transition_type (GTK_REVEALER (revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+	gtk_revealer_set_transition_duration (GTK_REVEALER (revealer), 160);
+	gtk_widget_set_halign (revealer, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign (revealer, GTK_ALIGN_END);
+	gtk_widget_set_margin_bottom (revealer, 16);
+	gtk_widget_set_margin_start (revealer, 8);
+	gtk_widget_set_margin_end (revealer, 8);
+	gtk_overlay_add_overlay (GTK_OVERLAY (self->priv->list_overlay), revealer);
+	gtk_overlay_set_overlay_pass_through (GTK_OVERLAY (self->priv->list_overlay), revealer, FALSE);
+	self->priv->selection_revealer = revealer;
+	gtk_widget_show (revealer);
+
+	bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
+	gtk_widget_set_name (bar, "omamail-selection-bar");
+	gtk_style_context_add_class (gtk_widget_get_style_context (bar), "oma-selection-bar");
+	gtk_container_add (GTK_CONTAINER (revealer), bar);
+	gtk_widget_show (bar);
+
+	widget = gtk_label_new (NULL);
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "oma-selection-count");
+	gtk_label_set_width_chars (GTK_LABEL (widget), 10);
+	gtk_label_set_xalign (GTK_LABEL (widget), 0.0);
+	gtk_widget_set_margin_start (widget, 8);
+	gtk_widget_set_margin_end (widget, 4);
+	gtk_box_pack_start (GTK_BOX (bar), widget, FALSE, FALSE, 0);
+	self->priv->selection_label = widget;
+	gtk_widget_show (widget);
+
+	widget = mail_paned_view_selection_button (self, "edit-select-all-symbolic", NULL, _("Select all messages"), NULL);
+	g_signal_connect (widget, "clicked", G_CALLBACK (mail_paned_view_select_all_clicked_cb), self);
+	gtk_box_pack_start (GTK_BOX (bar), widget, FALSE, FALSE, 0);
+
+	actions = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 2);
+	gtk_box_pack_start (GTK_BOX (bar), actions, FALSE, FALSE, 0);
+	self->priv->selection_actions = actions;
+	gtk_widget_show (actions);
+
+	widget = gtk_separator_new (GTK_ORIENTATION_VERTICAL);
+	gtk_widget_set_margin_start (widget, 4);
+	gtk_widget_set_margin_end (widget, 4);
+	gtk_box_pack_start (GTK_BOX (actions), widget, FALSE, FALSE, 0);
+	gtk_widget_show (widget);
+
+	gtk_box_pack_start (GTK_BOX (actions), mail_paned_view_selection_button (self,
+		"mail-read-symbolic", _("Read"), _("Mark the selected messages as read"), "mail-mark-read"), FALSE, FALSE, 0);
+	gtk_box_pack_start (GTK_BOX (actions), mail_paned_view_selection_button (self,
+		"mail-unread-symbolic", _("Unread"), _("Mark the selected messages as unread"), "mail-mark-unread"), FALSE, FALSE, 0);
+	gtk_box_pack_start (GTK_BOX (actions), mail_paned_view_selection_button (self,
+		"oma-mail-flag-symbolic", NULL, _("Flag or unflag the selected messages"), "oma-mail-flag-toggle"), FALSE, FALSE, 0);
+	gtk_box_pack_start (GTK_BOX (actions), mail_paned_view_selection_button (self,
+		"folder-symbolic", NULL, _("Move the selected messages to another folder"), "mail-move"), FALSE, FALSE, 0);
+	gtk_box_pack_start (GTK_BOX (actions), mail_paned_view_selection_button (self,
+		"mail-archive", NULL, _("Archive the selected messages"), "mail-archive"), FALSE, FALSE, 0);
+
+	widget = mail_paned_view_selection_button (self,
+		"user-trash-symbolic", NULL, _("Delete the selected messages"), "mail-delete");
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "destructive-action");
+	gtk_box_pack_start (GTK_BOX (actions), widget, FALSE, FALSE, 0);
+
+	widget = gtk_separator_new (GTK_ORIENTATION_VERTICAL);
+	gtk_widget_set_margin_start (widget, 4);
+	gtk_widget_set_margin_end (widget, 4);
+	gtk_box_pack_start (GTK_BOX (bar), widget, FALSE, FALSE, 0);
+	gtk_widget_show (widget);
+
+	widget = mail_paned_view_selection_button (self, "window-close-symbolic", NULL, _("Done selecting"), NULL);
+	g_signal_connect (widget, "clicked", G_CALLBACK (mail_paned_view_selection_done_clicked_cb), self);
+	gtk_box_pack_start (GTK_BOX (bar), widget, FALSE, FALSE, 0);
+
+	g_signal_connect_object (self->priv->message_list, "selection-change",
+		G_CALLBACK (mail_paned_view_selection_change_cb), self, 0);
+
+	mail_paned_view_update_selection_bar (self);
+}
+
+/* —— Omarchy per-row quick actions ——
+ * Hovering a message shows a small group of buttons on that row: toggle
+ * read, toggle flag, archive and delete. They act on the hovered message
+ * only, without changing the selection, so the message is not opened (and
+ * therefore not marked as read) by using them. */
+
+static GtkWidget *
+mail_paned_view_get_list_canvas (EMailPanedView *self)
+{
+	ETableItem *item;
+
+	if (!self->priv->message_list)
+		return NULL;
+
+	item = e_tree_get_item (E_TREE (self->priv->message_list));
+	if (!item)
+		return NULL;
+
+	return GTK_WIDGET (GNOME_CANVAS_ITEM (item)->canvas);
+}
+
+static void
+mail_paned_view_set_hover_row (EMailPanedView *self,
+			       gint row)
+{
+	ETableItem *item;
+	GtkWidget *canvas;
+
+	if (!self->priv->message_list)
+		return;
+
+	item = e_tree_get_item (E_TREE (self->priv->message_list));
+	if (!item || GPOINTER_TO_INT (g_object_get_data (G_OBJECT (item), "oma-hover-row")) == row + 1)
+		return;
+
+	g_object_set_data (G_OBJECT (item), "oma-hover-row", GINT_TO_POINTER (row + 1));
+
+	canvas = mail_paned_view_get_list_canvas (self);
+	if (canvas)
+		gtk_widget_queue_draw (canvas);
+}
+
+static void
+mail_paned_view_row_actions_hide (EMailPanedView *self)
+{
+	if (self->priv->row_hide_id) {
+		g_source_remove (self->priv->row_hide_id);
+		self->priv->row_hide_id = 0;
+	}
+
+	if (self->priv->row_actions)
+		gtk_widget_hide (self->priv->row_actions);
+
+	mail_paned_view_set_hover_row (self, -1);
+	g_clear_pointer (&self->priv->row_uid, g_free);
+	self->priv->row_index = -1;
+	self->priv->row_pointer_inside = FALSE;
+}
+
+static gboolean
+mail_paned_view_row_actions_hide_cb (gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+
+	self->priv->row_hide_id = 0;
+
+	if (!self->priv->row_pointer_inside)
+		mail_paned_view_row_actions_hide (self);
+
+	return G_SOURCE_REMOVE;
+}
+
+static void
+mail_paned_view_row_actions_schedule_hide (EMailPanedView *self)
+{
+	if (!self->priv->row_hide_id)
+		self->priv->row_hide_id = e_named_timeout_add (200, mail_paned_view_row_actions_hide_cb, self);
+}
+
+/* Shows the current read/flag state of the hovered message on the buttons. */
+static void
+mail_paned_view_row_actions_sync (EMailPanedView *self)
+{
+	CamelFolder *folder;
+	CamelMessageInfo *info = NULL;
+	guint32 flags = 0;
+	gboolean seen, flagged;
+
+	folder = message_list_ref_folder (MESSAGE_LIST (self->priv->message_list));
+	if (folder && self->priv->row_uid)
+		info = camel_folder_get_message_info (folder, self->priv->row_uid);
+	if (info) {
+		flags = camel_message_info_get_flags (info);
+		g_object_unref (info);
+	}
+	g_clear_object (&folder);
+
+	seen = (flags & CAMEL_MESSAGE_SEEN) != 0;
+	flagged = (flags & CAMEL_MESSAGE_FLAGGED) != 0;
+
+	gtk_image_set_from_icon_name (GTK_IMAGE (self->priv->row_read_image),
+		seen ? "mail-unread-symbolic" : "mail-read-symbolic", GTK_ICON_SIZE_BUTTON);
+	gtk_widget_set_tooltip_text (self->priv->row_read_button,
+		seen ? _("Mark as unread") : _("Mark as read"));
+
+	gtk_widget_set_tooltip_text (self->priv->row_flag_button,
+		flagged ? _("Remove flag") : _("Flag"));
+	if (flagged)
+		gtk_style_context_add_class (gtk_widget_get_style_context (self->priv->row_flag_button), "oma-flagged");
+	else
+		gtk_style_context_remove_class (gtk_widget_get_style_context (self->priv->row_flag_button), "oma-flagged");
+}
+
+static void
+mail_paned_view_row_actions_update (EMailPanedView *self)
+{
+	GtkWidget *canvas;
+	GdkWindow *window;
+	GdkDevice *pointer;
+	gint px = -1, py = -1, row = -1, col = -1;
+	gint cx = 0, cy = 0, cw = 0, ch = 0, ox = 0, oy = 0;
+	gchar *uid;
+
+	canvas = mail_paned_view_get_list_canvas (self);
+	if (!canvas || !self->priv->row_actions || !gtk_widget_get_mapped (canvas))
+		return;
+
+	window = gtk_widget_get_window (canvas);
+	pointer = gdk_seat_get_pointer (gdk_display_get_default_seat (gtk_widget_get_display (canvas)));
+	if (!window || !pointer)
+		return;
+
+	gdk_window_get_device_position (window, pointer, &px, &py, NULL);
+
+	if (px < 0 || py < 0 || px >= gtk_widget_get_allocated_width (canvas) || py >= gtk_widget_get_allocated_height (canvas)) {
+		mail_paned_view_row_actions_schedule_hide (self);
+		return;
+	}
+
+	e_tree_get_cell_at (E_TREE (self->priv->message_list), px, py, &row, &col);
+	uid = row >= 0 ? message_list_dup_uid_at_row (MESSAGE_LIST (self->priv->message_list), row) : NULL;
+
+	if (!uid) {
+		mail_paned_view_row_actions_schedule_hide (self);
+		return;
+	}
+
+	if (self->priv->row_hide_id) {
+		g_source_remove (self->priv->row_hide_id);
+		self->priv->row_hide_id = 0;
+	}
+
+	if (row == self->priv->row_index && g_strcmp0 (uid, self->priv->row_uid) == 0 &&
+	    gtk_widget_get_visible (self->priv->row_actions)) {
+		g_free (uid);
+		return;
+	}
+
+	g_free (self->priv->row_uid);
+	self->priv->row_uid = uid;
+	self->priv->row_index = row;
+
+	{
+		ETableItem *item = e_tree_get_item (E_TREE (self->priv->message_list));
+		gint vrow = row, vcol = 0, sx = 0, sy = 0;
+		gdouble wx, wy;
+
+		/* Item coordinates -> canvas pixels -> visible widget area. */
+		e_table_item_get_cell_geometry (item, &vrow, &vcol, &cx, &cy, &cw, &ch);
+		wx = cx;
+		wy = cy;
+		gnome_canvas_item_i2w (GNOME_CANVAS_ITEM (item), &wx, &wy);
+		gnome_canvas_w2c (GNOME_CANVAS (canvas), wx, wy, &cx, &cy);
+		gnome_canvas_get_scroll_offsets (GNOME_CANVAS (canvas), &sx, &sy);
+		cx -= sx;
+		cy -= sy;
+	}
+
+	gtk_widget_translate_coordinates (canvas, self->priv->list_overlay, cx, cy, &ox, &oy);
+
+	/* The same inset as the painted row card (see eti_draw). */
+	self->priv->row_rect.x = ox + 8;
+	self->priv->row_rect.y = oy + 3;
+	self->priv->row_rect.width = cw - 16;
+	self->priv->row_rect.height = ch - 7;
+
+	mail_paned_view_set_hover_row (self, row);
+
+	if (e_selection_model_is_row_selected (e_tree_get_selection_model (E_TREE (self->priv->message_list)), row))
+		gtk_style_context_add_class (gtk_widget_get_style_context (self->priv->row_actions), "oma-on-selected");
+	else
+		gtk_style_context_remove_class (gtk_widget_get_style_context (self->priv->row_actions), "oma-on-selected");
+
+	mail_paned_view_row_actions_sync (self);
+	gtk_widget_show (self->priv->row_actions);
+	gtk_widget_queue_resize (self->priv->row_actions);
+}
+
+static gboolean
+mail_paned_view_overlay_get_child_position_cb (GtkOverlay *overlay,
+					       GtkWidget *widget,
+					       GdkRectangle *allocation,
+					       gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+	gint width = 0, height = 0;
+
+	if (widget != self->priv->row_actions)
+		return FALSE;
+
+	gtk_widget_get_preferred_width (widget, NULL, &width);
+	gtk_widget_get_preferred_height (widget, NULL, &height);
+
+	/* Top-right of the row card, on the sender line, where the time is:
+	 * the actions take the time's place while the row is hovered. */
+	allocation->width = width;
+	allocation->height = height;
+	allocation->x = MAX (self->priv->row_rect.x, self->priv->row_rect.x + self->priv->row_rect.width - width - 4);
+	allocation->y = self->priv->row_rect.y + 6;
+
+	return TRUE;
+}
+
+static gboolean
+mail_paned_view_list_motion_cb (GtkWidget *widget,
+				GdkEvent *event,
+				gpointer user_data)
+{
+	mail_paned_view_row_actions_update (E_MAIL_PANED_VIEW (user_data));
+
+	return FALSE;
+}
+
+static gboolean
+mail_paned_view_list_leave_cb (GtkWidget *widget,
+			       GdkEventCrossing *event,
+			       gpointer user_data)
+{
+	mail_paned_view_row_actions_schedule_hide (E_MAIL_PANED_VIEW (user_data));
+
+	return FALSE;
+}
+
+static gboolean
+mail_paned_view_row_actions_crossing_cb (GtkWidget *widget,
+					 GdkEventCrossing *event,
+					 gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+
+	if (event->detail == GDK_NOTIFY_INFERIOR)
+		return FALSE;
+
+	self->priv->row_pointer_inside = event->type == GDK_ENTER_NOTIFY;
+
+	if (self->priv->row_pointer_inside) {
+		if (self->priv->row_hide_id) {
+			g_source_remove (self->priv->row_hide_id);
+			self->priv->row_hide_id = 0;
+		}
+	} else {
+		mail_paned_view_row_actions_schedule_hide (self);
+	}
+
+	return FALSE;
+}
+
+static void
+mail_paned_view_list_scrolled_cb (GtkAdjustment *adjustment,
+				  gpointer user_data)
+{
+	/* Rows moved under the pointer; follow on the next motion. */
+	mail_paned_view_row_actions_hide (E_MAIL_PANED_VIEW (user_data));
+}
+
+/* When the hovered message is the one open in the reader, use the regular
+ * actions, so the reader's own logic (mark-as-read timer, moving to the
+ * next message after delete) stays consistent. */
+static gboolean
+mail_paned_view_row_is_current (EMailPanedView *self)
+{
+	MessageList *message_list = MESSAGE_LIST (self->priv->message_list);
+
+	return message_list_selected_count (message_list) == 1 &&
+		g_strcmp0 (message_list->cursor_uid, self->priv->row_uid) == 0;
+}
+
+static void
+mail_paned_view_row_run_action (EMailPanedView *self,
+				const gchar *action_name)
+{
+	EUIAction *action;
+
+	action = e_mail_reader_get_action (E_MAIL_READER (self), action_name);
+	if (action && e_ui_action_get_sensitive (action))
+		g_action_activate (G_ACTION (action), NULL);
+}
+
+static void
+mail_paned_view_row_set_flags (EMailPanedView *self,
+			       guint32 mask,
+			       guint32 set)
+{
+	CamelFolder *folder;
+
+	folder = message_list_ref_folder (MESSAGE_LIST (self->priv->message_list));
+	if (folder && self->priv->row_uid)
+		camel_folder_set_message_flags (folder, self->priv->row_uid, mask, set);
+	g_clear_object (&folder);
+}
+
+static guint32
+mail_paned_view_row_get_flags (EMailPanedView *self)
+{
+	CamelFolder *folder;
+	CamelMessageInfo *info = NULL;
+	guint32 flags = 0;
+
+	folder = message_list_ref_folder (MESSAGE_LIST (self->priv->message_list));
+	if (folder && self->priv->row_uid)
+		info = camel_folder_get_message_info (folder, self->priv->row_uid);
+	if (info) {
+		flags = camel_message_info_get_flags (info);
+		g_object_unref (info);
+	}
+	g_clear_object (&folder);
+
+	return flags;
+}
+
+static void
+mail_paned_view_row_read_clicked_cb (GtkButton *button,
+				     gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+	gboolean seen = (mail_paned_view_row_get_flags (self) & CAMEL_MESSAGE_SEEN) != 0;
+
+	if (mail_paned_view_row_is_current (self))
+		mail_paned_view_row_run_action (self, seen ? "mail-mark-unread" : "mail-mark-read");
+	else
+		mail_paned_view_row_set_flags (self, CAMEL_MESSAGE_SEEN, seen ? 0 : CAMEL_MESSAGE_SEEN);
+
+	mail_paned_view_row_actions_sync (self);
+}
+
+static void
+mail_paned_view_row_flag_clicked_cb (GtkButton *button,
+				     gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+	gboolean flagged = (mail_paned_view_row_get_flags (self) & CAMEL_MESSAGE_FLAGGED) != 0;
+
+	mail_paned_view_row_set_flags (self, CAMEL_MESSAGE_FLAGGED, flagged ? 0 : CAMEL_MESSAGE_FLAGGED);
+	mail_paned_view_row_actions_sync (self);
+}
+
+static void
+mail_paned_view_row_delete_clicked_cb (GtkButton *button,
+				       gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+
+	if (mail_paned_view_row_is_current (self)) {
+		mail_paned_view_row_run_action (self, "mail-delete");
+	} else {
+		e_tree_preserve_viewport (E_TREE (self->priv->message_list));
+		mail_paned_view_row_set_flags (self,
+			CAMEL_MESSAGE_SEEN | CAMEL_MESSAGE_DELETED,
+			CAMEL_MESSAGE_SEEN | CAMEL_MESSAGE_DELETED);
+	}
+
+	mail_paned_view_row_actions_hide (self);
+}
+
+static void
+mail_paned_view_row_archive_clicked_cb (GtkButton *button,
+					gpointer user_data)
+{
+	EMailPanedView *self = user_data;
+	EMailBackend *backend;
+	CamelFolder *folder;
+	GPtrArray *uids;
+	gchar *archive_folder;
+
+	if (!self->priv->row_uid)
+		return;
+
+	if (mail_paned_view_row_is_current (self)) {
+		mail_paned_view_row_run_action (self, "mail-archive");
+		mail_paned_view_row_actions_hide (self);
+		return;
+	}
+
+	backend = e_mail_reader_get_backend (E_MAIL_READER (self));
+	folder = message_list_ref_folder (MESSAGE_LIST (self->priv->message_list));
+	if (!folder)
+		return;
+
+	uids = g_ptr_array_new_with_free_func (g_free);
+	g_ptr_array_add (uids, g_strdup (self->priv->row_uid));
+
+	archive_folder = em_utils_get_archive_folder_uri_from_folder (folder, backend, uids, TRUE);
+
+	if (archive_folder && *archive_folder) {
+		e_tree_preserve_viewport (E_TREE (self->priv->message_list));
+		mail_transfer_messages (
+			e_mail_backend_get_session (backend), folder, uids,
+			TRUE, archive_folder, 0, NULL, NULL);
+	} else {
+		e_alert_submit (e_mail_reader_get_alert_sink (E_MAIL_READER (self)),
+			"mail:no-archive-folder", NULL);
+	}
+
+	g_free (archive_folder);
+	g_ptr_array_unref (uids);
+	g_object_unref (folder);
+
+	mail_paned_view_row_actions_hide (self);
+}
+
+static GtkWidget *
+mail_paned_view_row_button (EMailPanedView *self,
+			    const gchar *icon_name,
+			    const gchar *tooltip,
+			    GCallback callback,
+			    GtkWidget **out_image)
+{
+	GtkWidget *button, *image;
+
+	image = gtk_image_new_from_icon_name (icon_name, GTK_ICON_SIZE_BUTTON);
+	gtk_widget_show (image);
+
+	button = gtk_button_new ();
+	gtk_button_set_relief (GTK_BUTTON (button), GTK_RELIEF_NONE);
+	gtk_widget_set_can_focus (button, FALSE);
+	gtk_widget_set_tooltip_text (button, tooltip);
+	gtk_container_add (GTK_CONTAINER (button), image);
+	g_signal_connect (button, "clicked", callback, self);
+	gtk_widget_show (button);
+
+	if (out_image)
+		*out_image = image;
+
+	return button;
+}
+
+static void
+mail_paned_view_build_row_actions (EMailPanedView *self)
+{
+	GtkWidget *event_box, *box, *widget, *canvas;
+
+	self->priv->row_index = -1;
+
+	event_box = gtk_event_box_new ();
+	gtk_widget_add_events (event_box, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
+	gtk_widget_set_no_show_all (event_box, TRUE);
+	g_signal_connect (event_box, "enter-notify-event",
+		G_CALLBACK (mail_paned_view_row_actions_crossing_cb), self);
+	g_signal_connect (event_box, "leave-notify-event",
+		G_CALLBACK (mail_paned_view_row_actions_crossing_cb), self);
+	gtk_overlay_add_overlay (GTK_OVERLAY (self->priv->list_overlay), event_box);
+	self->priv->row_actions = event_box;
+
+	box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+	gtk_widget_set_name (box, "omamail-row-actions");
+	gtk_container_add (GTK_CONTAINER (event_box), box);
+	gtk_widget_show (box);
+
+	self->priv->row_read_button = mail_paned_view_row_button (self, "mail-read-symbolic", _("Mark as read"),
+		G_CALLBACK (mail_paned_view_row_read_clicked_cb), &self->priv->row_read_image);
+	gtk_box_pack_start (GTK_BOX (box), self->priv->row_read_button, FALSE, FALSE, 0);
+
+	self->priv->row_flag_button = mail_paned_view_row_button (self, "oma-mail-flag-symbolic", _("Flag"),
+		G_CALLBACK (mail_paned_view_row_flag_clicked_cb), NULL);
+	gtk_box_pack_start (GTK_BOX (box), self->priv->row_flag_button, FALSE, FALSE, 0);
+
+	widget = mail_paned_view_row_button (self, "mail-archive", _("Archive"),
+		G_CALLBACK (mail_paned_view_row_archive_clicked_cb), NULL);
+	gtk_box_pack_start (GTK_BOX (box), widget, FALSE, FALSE, 0);
+
+	widget = mail_paned_view_row_button (self, "user-trash-symbolic", _("Delete"),
+		G_CALLBACK (mail_paned_view_row_delete_clicked_cb), NULL);
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "destructive-action");
+	gtk_box_pack_start (GTK_BOX (box), widget, FALSE, FALSE, 0);
+
+	g_signal_connect_object (self->priv->list_overlay, "get-child-position",
+		G_CALLBACK (mail_paned_view_overlay_get_child_position_cb), self, 0);
+
+	canvas = mail_paned_view_get_list_canvas (self);
+	if (canvas) {
+		gtk_widget_add_events (canvas, GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK);
+		g_signal_connect_object (canvas, "motion-notify-event",
+			G_CALLBACK (mail_paned_view_list_motion_cb), self, 0);
+		g_signal_connect_object (canvas, "leave-notify-event",
+			G_CALLBACK (mail_paned_view_list_leave_cb), self, 0);
+	}
+
+	if (self->priv->scrolled_window) {
+		GtkAdjustment *adjustment;
+
+		adjustment = gtk_scrolled_window_get_vadjustment (GTK_SCROLLED_WINDOW (self->priv->scrolled_window));
+		g_signal_connect_object (adjustment, "value-changed",
+			G_CALLBACK (mail_paned_view_list_scrolled_cb), self, 0);
+	}
+
+	/* The list was rebuilt (folder switch, search, deletion) */
+	g_signal_connect_object (self->priv->message_list, "message-list-built",
+		G_CALLBACK (mail_paned_view_row_actions_hide), self, G_CONNECT_SWAPPED);
+}
+
 static void
 mail_paned_display_view_cb (GalViewInstance *view_instance,
                             GalView *gal_view,
@@ -585,6 +1334,16 @@ mail_paned_view_dispose (GObject *object)
 
 	g_clear_object (&self->priv->paned);
 	g_clear_object (&self->priv->scrolled_window);
+	if (self->priv->row_hide_id) {
+		g_source_remove (self->priv->row_hide_id);
+		self->priv->row_hide_id = 0;
+	}
+	g_clear_pointer (&self->priv->row_uid, g_free);
+	self->priv->row_actions = NULL;
+	g_clear_object (&self->priv->list_overlay);
+	self->priv->selection_revealer = NULL;
+	self->priv->selection_label = NULL;
+	self->priv->selection_actions = NULL;
 
 	if (self->priv->message_list != NULL) {
 		/* It can be disconnected by EMailReader in e_mail_reader_dispose() */
@@ -895,9 +1654,18 @@ mail_paned_view_constructed (GObject *object)
 
 	container = GTK_WIDGET (object);
 
+	/* The quick selection bar floats over the whole view, so it fits
+	 * even when the message list column is narrow. */
+	widget = gtk_overlay_new ();
+	gtk_box_pack_start (GTK_BOX (container), widget, TRUE, TRUE, 0);
+	self->priv->list_overlay = g_object_ref (widget);
+	gtk_widget_show (widget);
+
+	container = widget;
+
 	widget = e_paned_new (GTK_ORIENTATION_VERTICAL);
 	e_paned_set_fixed_resize (E_PANED (widget), FALSE);
-	gtk_box_pack_start (GTK_BOX (container), widget, TRUE, TRUE, 0);
+	gtk_container_add (GTK_CONTAINER (container), widget);
 	self->priv->paned = g_object_ref (widget);
 	gtk_widget_show (widget);
 
@@ -927,6 +1695,9 @@ mail_paned_view_constructed (GObject *object)
 		self->priv->message_list, "message-list-built",
 		G_CALLBACK (mail_paned_view_message_list_built_cb),
 		object);
+
+	mail_paned_view_build_selection_bar (self);
+	mail_paned_view_build_row_actions (self);
 
 	container = self->priv->paned;
 
@@ -1391,6 +2162,36 @@ e_mail_paned_view_hide_message_list_pane (EMailPanedView *view,
 		gtk_widget_show (view->priv->scrolled_window);
 	else
 		gtk_widget_hide (view->priv->scrolled_window);
+}
+
+gboolean
+e_mail_paned_view_get_select_mode (EMailPanedView *view)
+{
+	g_return_val_if_fail (E_IS_MAIL_PANED_VIEW (view), FALSE);
+
+	return view->priv->select_mode;
+}
+
+void
+e_mail_paned_view_set_select_mode (EMailPanedView *view,
+				   gboolean select_mode)
+{
+	ESelectionModel *selection;
+
+	g_return_if_fail (E_IS_MAIL_PANED_VIEW (view));
+
+	view->priv->select_mode = select_mode;
+
+	if (view->priv->message_list) {
+		selection = e_tree_get_selection_model (E_TREE (view->priv->message_list));
+		/* Read by ETableItem: plain clicks toggle rows like Ctrl+click */
+		g_object_set_data (G_OBJECT (selection), "oma-toggle-select", GINT_TO_POINTER (select_mode ? 1 : 0));
+
+		if (select_mode)
+			gtk_widget_grab_focus (view->priv->message_list);
+	}
+
+	mail_paned_view_update_selection_bar (view);
 }
 
 GtkWidget *

@@ -3,6 +3,7 @@
     <start>
       <item action='mail-send-receive-receive-all' icon_only='false' label_priority='0'/>
       <item action='mail-jump-top' icon_only='false' label_priority='0'/>
+      <item action='oma-select-mode'/>
     </start>
     <end>
       <item action='oma-mail-flag-toggle'/>
@@ -36,6 +37,7 @@
     <submenu action='view-menu'>
       <item action='mail-jump-top'/>
       <item action='oma-unread-filter'/>
+      <item action='oma-select-mode'/>
       <submenu action='layout-menu'>
         <placeholder id='view-layout-custom-menus'>
           <item action='mail-show-preview-toolbar'/>

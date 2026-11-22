@@ -59,6 +59,11 @@ gboolean	e_mail_paned_view_get_preview_toolbar_visible
 void		e_mail_paned_view_set_preview_toolbar_visible
 						(EMailPanedView *view,
 						 gboolean value);
+gboolean	e_mail_paned_view_get_select_mode
+						(EMailPanedView *view);
+void		e_mail_paned_view_set_select_mode
+						(EMailPanedView *view,
+						 gboolean select_mode);
 void		e_mail_paned_view_take_preview_toolbar
 						(EMailPanedView *self,
 						 GtkWidget *toolbar);

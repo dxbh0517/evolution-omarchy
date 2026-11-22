@@ -225,6 +225,8 @@ void		message_list_save_state		(MessageList *message_list);
 
 void		message_list_sort_uids		(MessageList *message_list,
 						 GPtrArray *uids);
+gchar *		message_list_dup_uid_at_row	(MessageList *message_list,
+						 gint view_row);
 gboolean	message_list_contains_uid	(MessageList *message_list,
 						 const gchar *uid);
 void		message_list_inc_setting_up_search_folder
