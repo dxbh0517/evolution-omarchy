@@ -35,6 +35,78 @@ static const gchar *formatter_mime_types[] = {
 	NULL
 };
 
+/* Up to two initials from a display name or address ("Lena Hoffmann" → "LH"). */
+static gchar *
+oma_initials (const gchar *display)
+{
+	GString *out = g_string_new ("");
+	const gchar *ptr = display;
+	gboolean at_word = TRUE;
+	gint count = 0;
+
+	for (; ptr && *ptr && count < 2; ptr = g_utf8_next_char (ptr)) {
+		gunichar ch = g_utf8_get_char (ptr);
+
+		if (ch == '@')
+			break;
+		if (g_unichar_isalnum (ch)) {
+			if (at_word) {
+				g_string_append_unichar (out, g_unichar_toupper (ch));
+				count++;
+			}
+			at_word = FALSE;
+		} else {
+			at_word = TRUE;
+		}
+	}
+
+	if (!out->len)
+		g_string_append (out, "?");
+
+	return g_string_free (out, FALSE);
+}
+
+/* Each recipient becomes a quiet chip: the name, with the address on
+ * hover. Long lists fold into a "+N" chip. */
+static void
+oma_append_recipient_chips (GString *out,
+			    struct _camel_header_address *addr)
+{
+	const guint max_chips = 4;
+	guint shown = 0, hidden = 0;
+
+	for (; addr; addr = addr->next) {
+		const gchar *label = NULL, *title = NULL;
+		gchar *label_esc, *title_esc;
+
+		if (addr->type == CAMEL_HEADER_ADDRESS_NAME) {
+			label = (addr->name && *addr->name) ? addr->name : addr->v.addr;
+			title = addr->v.addr;
+		} else if (addr->type == CAMEL_HEADER_ADDRESS_GROUP) {
+			label = addr->name;
+			title = addr->name;
+		}
+
+		if (!label || !*label)
+			continue;
+
+		if (shown >= max_chips) {
+			hidden++;
+			continue;
+		}
+
+		label_esc = g_markup_escape_text (label, -1);
+		title_esc = g_markup_escape_text (title ? title : label, -1);
+		g_string_append_printf (out, "<span class=\"oma-chip\" title=\"%s\">%s</span>", title_esc, label_esc);
+		g_free (label_esc);
+		g_free (title_esc);
+		shown++;
+	}
+
+	if (hidden > 0)
+		g_string_append_printf (out, "<span class=\"oma-chip oma-chip-more\">+%u</span>", hidden);
+}
+
 static void
 format_short_headers (EMailFormatter *formatter,
                       GString *buffer,
@@ -49,6 +121,7 @@ format_short_headers (EMailFormatter *formatter,
 	gchar *subject = NULL;
 	gchar *date = NULL;
 	GString *to;
+	GString *cc;
 	struct _camel_header_address *addrs = NULL;
 	const CamelNameValueArray *headers;
 	guint ii, len;
@@ -68,6 +141,7 @@ format_short_headers (EMailFormatter *formatter,
 	evolution_imagesdir = g_filename_to_uri (EVOLUTION_IMAGESDIR, NULL, NULL);
 	from = g_string_new ("");
 	to = g_string_new ("");
+	cc = g_string_new ("");
 
 	g_string_append_printf (
 		buffer,
@@ -98,10 +172,12 @@ format_short_headers (EMailFormatter *formatter,
 				g_string_assign (from, tmp->str);
 			g_string_free (tmp, TRUE);
 
-		} else if (!g_ascii_strcasecmp (header_name, "To")) {
+		} else if (!g_ascii_strcasecmp (header_name, "To") ||
+			   !g_ascii_strcasecmp (header_name, "Cc")) {
 			struct _camel_header_address *recipients = camel_header_address_decode (header_value, hdr_charset);
 			if (recipients) {
-				e_mail_formatter_format_address (formatter, to, recipients, header_name, FALSE, TRUE);
+				oma_append_recipient_chips (
+					g_ascii_strcasecmp (header_name, "To") ? cc : to, recipients);
 				camel_header_address_list_clear (&recipients);
 			}
 		} else if (!g_ascii_strcasecmp (header_name, "Date")) {
@@ -136,24 +212,39 @@ format_short_headers (EMailFormatter *formatter,
 	else
 		g_string_append (buffer, _("(no subject)"));
 	g_string_append (buffer, "</div>");
-	/* Sender by name (address on hover), then one quiet line: To · date. */
-	if (addrs && addrs->type == CAMEL_HEADER_ADDRESS_NAME && addrs->name && *addrs->name && addrs->v.addr) {
-		gchar *name = g_markup_escape_text (addrs->name, -1);
+	/* Sender row: initials avatar, name over address, date at the end.
+	 * Then one row of recipient chips: TO … CC … */
+	g_string_append (buffer, "<div class=\"oma-message-from\">");
+	if (addrs && addrs->type == CAMEL_HEADER_ADDRESS_NAME && addrs->v.addr) {
+		const gchar *display = (addrs->name && *addrs->name) ? addrs->name : addrs->v.addr;
+		gchar *name = g_markup_escape_text (display, -1);
 		gchar *addr = g_markup_escape_text (addrs->v.addr, -1);
-		g_string_append_printf (buffer, "<div class=\"oma-message-sender\" title=\"%s\">%s</div>", addr, name);
+		gchar *initials = oma_initials (display);
+
+		g_string_append_printf (buffer,
+			"<div class=\"oma-avatar\" style=\"--oma-hue: %u\" aria-hidden=\"true\">%s</div>"
+			"<div class=\"oma-from-text\">"
+			"<div class=\"oma-message-sender\">%s</div>",
+			g_str_hash (addrs->v.addr) % 360, initials, name);
+		if (addrs->name && *addrs->name)
+			g_string_append_printf (buffer, "<div class=\"oma-message-address\">%s</div>", addr);
+		g_string_append (buffer, "</div>");
+		g_free (initials);
 		g_free (name);
 		g_free (addr);
 	} else if (from->len > 0) {
-		g_string_append_printf (buffer, "<div class=\"oma-message-sender\">%s</div>", from->str);
+		g_string_append_printf (buffer,
+			"<div class=\"oma-from-text\"><div class=\"oma-message-sender\">%s</div></div>", from->str);
 	}
-	if (to->len > 0 || date) {
-		g_string_append (buffer, "<div class=\"oma-message-meta\">");
+	if (date)
+		g_string_append_printf (buffer, "<div class=\"oma-message-date\">%s</div>", date);
+	g_string_append (buffer, "</div>");
+	if (to->len > 0 || cc->len > 0) {
+		g_string_append (buffer, "<div class=\"oma-message-recipients\">");
 		if (to->len > 0)
-			g_string_append_printf (buffer, "<span class=\"oma-message-to\">%s: %s</span>", _("To"), to->str);
-		if (to->len > 0 && date)
-			g_string_append (buffer, "<span class=\"oma-message-sep\"> · </span>");
-		if (date)
-			g_string_append_printf (buffer, "<span class=\"oma-message-date\">%s</span>", date);
+			g_string_append_printf (buffer, "<span class=\"oma-rcpt-label\">%s</span>%s", _("To"), to->str);
+		if (cc->len > 0)
+			g_string_append_printf (buffer, "<span class=\"oma-rcpt-label\">%s</span>%s", _("Cc"), cc->str);
 		g_string_append (buffer, "</div>");
 	}
 	g_string_append (buffer, "</td>");
@@ -182,6 +273,7 @@ format_short_headers (EMailFormatter *formatter,
 	g_free (subject);
 	g_free (date);
 	g_string_free (to, TRUE);
+	g_string_free (cc, TRUE);
 	if (addrs)
 		camel_header_address_list_clear (&addrs);
 

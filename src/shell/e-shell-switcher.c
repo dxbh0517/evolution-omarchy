@@ -55,6 +55,22 @@ G_DEFINE_TYPE_WITH_CODE (EShellSwitcher, e_shell_switcher, GTK_TYPE_BIN,
 	G_IMPLEMENT_INTERFACE (E_TYPE_EXTENSIBLE, NULL)
 	G_IMPLEMENT_INTERFACE (GTK_TYPE_TOOL_SHELL, shell_switcher_tool_shell_iface_init))
 
+/* In the labelled list, start each button's icon and label at the left
+ * edge so the rows line up like a menu; icon-only buttons stay centred. */
+static void
+shell_switcher_align_proxy (GtkWidget *proxy,
+                            gboolean icons_only)
+{
+	GtkWidget *child = proxy;
+
+	if (GTK_IS_TOOL_ITEM (child))
+		child = gtk_bin_get_child (GTK_BIN (child));
+	if (GTK_IS_BUTTON (child))
+		child = gtk_bin_get_child (GTK_BIN (child));
+	if (child)
+		gtk_widget_set_halign (child, icons_only ? GTK_ALIGN_CENTER : GTK_ALIGN_START);
+}
+
 static gint
 shell_switcher_layout_actions (EShellSwitcher *switcher)
 {
@@ -90,6 +106,11 @@ shell_switcher_layout_actions (EShellSwitcher *switcher)
 
 	/* Figure out how many rows and columns we'll use. */
 	btns_per_row = MAX (1, allocation.width / (max_width + H_PADDING));
+	if (!icons_only) {
+		/* Labelled buttons form a vertical list, one module per
+		 * row, like a navigation menu rather than a grid. */
+		btns_per_row = 1;
+	}
 	if (!icons_only) {
 		/* If using text buttons, we want to try to have a
 		 * completely filled-in grid, but if we can't, we want
@@ -145,6 +166,8 @@ shell_switcher_layout_actions (EShellSwitcher *switcher)
 			child_allocation.y = y;
 			child_allocation.width = max_width + extra_width;
 			child_allocation.height = max_height;
+
+			shell_switcher_align_proxy (GTK_WIDGET (p->data), icons_only);
 
 			gtk_widget_size_allocate (
 				GTK_WIDGET (p->data), &child_allocation);

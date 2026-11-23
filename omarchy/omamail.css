@@ -340,9 +340,9 @@ statusbar {
   border: 0;
   box-shadow: none;
   border-radius: 8px;
-  padding: 4px;
+  padding: 5px 10px;
   min-width: 30px;
-  min-height: 30px;
+  min-height: 26px;
   color: #7a849e;
   -gtk-icon-effect: none;
   transition: background-color 120ms cubic-bezier(0.23, 1, 0.32, 1),
@@ -563,4 +563,208 @@ tooltip {
 #omamail-row-actions button.destructive-action:hover {
   background-color: rgba(247, 118, 142, 0.16);
   color: #f7768e;
+}
+
+/* Labelled module list (expanded sidebar): Mail / Calendar / Contacts / …
+ * one per row, icon then label, like a navigation menu. */
+#omamail-switcher toolbutton > button label {
+  font-size: 13px;
+  font-weight: 500;
+  margin-left: 8px;
+}
+
+#omamail-switcher toolbutton > button:checked label {
+  font-weight: 600;
+}
+
+/* —— Message list header ——
+ * A large mailbox title with its scope in the accent, italic; filter
+ * chips underneath. */
+#omamail-list-column {
+  background-color: #1a1b26;
+}
+
+#omamail-list-header {
+  padding: 14px 14px 8px 16px;
+  border-bottom: 1px solid rgba(169, 177, 214, 0.06);
+}
+
+#omamail-list-header .oma-list-title {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: #c0caf5;
+}
+
+#omamail-list-header .oma-list-subtitle {
+  font-size: 16px;
+  font-style: italic;
+  font-weight: 500;
+  color: #7aa2f7;
+}
+
+#omamail-list-filters {
+  margin-top: 10px;
+}
+
+#omamail-list-filters button.oma-chip {
+  background-image: none;
+  background-color: transparent;
+  border: 1px solid rgba(169, 177, 214, 0.16);
+  box-shadow: none;
+  border-radius: 999px;
+  padding: 2px 11px;
+  min-height: 22px;
+  min-width: 0;
+  color: #8b93b3;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background-color 120ms cubic-bezier(0.23, 1, 0.32, 1),
+              color 120ms cubic-bezier(0.23, 1, 0.32, 1),
+              border-color 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+#omamail-list-filters button.oma-chip.image-button {
+  padding: 2px 8px;
+}
+
+#omamail-list-filters button.oma-chip:hover {
+  background-color: #1f2335;
+  color: #c0caf5;
+}
+
+#omamail-list-filters button.oma-chip:checked {
+  background-color: rgba(122, 162, 247, 0.16);
+  border-color: rgba(122, 162, 247, 0.45);
+  color: #7aa2f7;
+}
+
+#omamail-list-filters button.oma-chip:active {
+  background-color: rgba(122, 162, 247, 0.24);
+  transition-duration: 0ms;
+}
+
+/* —— Reader action bar ——
+ * Outlined reply pills, Reply filled with the accent; quieter icon
+ * actions are pushed to the right edge. */
+#omamail-preview-bar toolbar {
+  background-color: #1a1b26;
+  border: 0;
+  border-bottom: 1px solid rgba(169, 177, 214, 0.06);
+  padding: 8px 20px;
+}
+
+#omamail-preview-bar toolbar toolbutton > button,
+#omamail-preview-bar toolbar toolbutton > box > button {
+  background-image: none;
+  background-color: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 5px 7px;
+  min-height: 26px;
+  color: #a9b1d6;
+  transition: background-color 120ms cubic-bezier(0.23, 1, 0.32, 1),
+              color 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+#omamail-preview-bar toolbar toolbutton > button:hover,
+#omamail-preview-bar toolbar toolbutton > box > button:hover {
+  background-color: #292e42;
+  color: #c0caf5;
+}
+
+#omamail-preview-bar toolbar .oma-pill {
+  margin-right: 6px;
+}
+
+#omamail-preview-bar toolbar .oma-pill > button,
+#omamail-preview-bar toolbar .oma-pill > box > button {
+  border: 1px solid rgba(169, 177, 214, 0.20);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+
+/* Split pills (Reply all ▾, Forward ▾): one rounded outline. */
+#omamail-preview-bar toolbar .oma-pill > box > button:first-child {
+  border-right-width: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  padding-right: 8px;
+}
+
+#omamail-preview-bar toolbar .oma-pill > box > button:last-child {
+  border-left-width: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding: 4px 9px 4px 2px;
+}
+
+#omamail-preview-bar toolbar .oma-pill-primary > button,
+#omamail-preview-bar toolbar .oma-pill-primary > box > button {
+  background-color: #7aa2f7;
+  border-color: #7aa2f7;
+  color: #13141c;
+  font-weight: 600;
+}
+
+#omamail-preview-bar toolbar .oma-pill-primary > button:hover,
+#omamail-preview-bar toolbar .oma-pill-primary > box > button:hover {
+  background-color: #8fb0f8;
+  color: #13141c;
+}
+
+#omamail-preview-bar toolbar .oma-pill-primary > button:active,
+#omamail-preview-bar toolbar .oma-pill-primary > box > button:active {
+  background-color: #5d8de0;
+}
+
+#omamail-preview-bar toolbar toolbutton > button:active,
+#omamail-preview-bar toolbar toolbutton > box > button:active {
+  transition-duration: 0ms;
+}
+
+/* —— My Day ——
+ * Right column: month at a glance, then today / tomorrow and tasks. */
+#omamail-my-day {
+  background-color: #12131a;
+  border-left: 1px solid rgba(169, 177, 214, 0.06);
+  padding: 14px 10px 8px;
+}
+
+#omamail-my-day .oma-my-day-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #7a849e;
+  margin: 0 6px 6px;
+}
+
+#omamail-my-day .oma-my-day-calendar {
+  margin: 0 0 10px;
+  background-color: #12131a;
+}
+
+#omamail-my-day treeview,
+#omamail-my-day scrolledwindow,
+#omamail-my-day viewport {
+  background-color: #12131a;
+  color: #c0caf5;
+}
+
+#omamail-my-day treeview {
+  -GtkTreeView-vertical-separator: 6;
+  -GtkTreeView-expander-size: 10;
+  font-size: 12.5px;
+  border-top: 1px solid rgba(169, 177, 214, 0.06);
+  padding-top: 6px;
+}
+
+#omamail-my-day treeview:hover {
+  background-color: rgba(41, 46, 66, 0.55);
+}
+
+#omamail-my-day treeview:selected {
+  background-color: #283552;
+  color: #e0e7ff;
 }

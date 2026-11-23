@@ -9,8 +9,9 @@ backup.parent.mkdir(parents=True, exist_ok=True)
 if not backup.exists():
     backup.write_bytes(subprocess.check_output(['dconf', 'dump', '/org/gnome/evolution/']))
     backup.chmod(0o600)
-# Calm Apple-Mail chrome: hide secondary toolbars/headers by default;
-# keep the status bar for sync feedback. Folder rail slightly wider for labels.
+# Calm chrome: one reader action bar (Reply pills) instead of a main toolbar,
+# and a "My Day" column (month, today/tomorrow, tasks) on the right.
+# Keep the status bar for sync feedback. Folder rail slightly wider for labels.
 defaults = {
     'org.gnome.evolution.shell': {
         'use-header-bar': True, 'icon-only-buttons-in-header-bar': True,
@@ -23,7 +24,8 @@ defaults = {
     'org.gnome.evolution.mail': {
         'layout': 1, 'hpaned-size': 1420000, 'global-view-setting': False,
         'show-subject-above-sender': False, 'show-email': False,
-        'show-preview-toolbar': False, 'show-to-do-bar': False,
+        'show-preview-toolbar': True, 'show-to-do-bar': True,
+        'to-do-bar-width': 1170000,
         'show-sender-photo': False, 'headers-collapsed': True,
         'show-all-headers': False, 'show-attachment-bar': True,
         'preview-unset-html-colors': True,

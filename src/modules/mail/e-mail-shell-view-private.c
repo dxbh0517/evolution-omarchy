@@ -8,6 +8,7 @@
 #include "e-mail-shell-view-private.h"
 
 #include "e-util/e-util-private.h"
+#include "mail/e-mail-paned-view.h"
 
 typedef struct _AsyncContext AsyncContext;
 
@@ -398,6 +399,98 @@ mail_shell_view_notify_view_id_cb (EMailShellView *mail_shell_view)
 	gal_view_instance_set_current_view_id (view_instance, view_id);
 }
 
+/* —— List filter chips ——
+ * All / Unread / Flagged / Attachments above the message list. They are a
+ * face for the search bar's filter combo, so both stay in step. */
+#define OMA_CHIP_FILTER "oma-chip-filter"
+#define OMA_CHIPS_SYNCING "oma-chips-syncing"
+
+static void
+oma_list_chips_sync (GtkWidget *chips,
+		     gint current)
+{
+	GList *children, *link;
+
+	g_object_set_data (G_OBJECT (chips), OMA_CHIPS_SYNCING, GINT_TO_POINTER (1));
+	children = gtk_container_get_children (GTK_CONTAINER (chips));
+	for (link = children; link; link = g_list_next (link)) {
+		gint filter = GPOINTER_TO_INT (g_object_get_data (link->data, OMA_CHIP_FILTER)) - 1;
+		gtk_toggle_button_set_active (link->data, filter == current);
+	}
+	g_list_free (children);
+	g_object_set_data (G_OBJECT (chips), OMA_CHIPS_SYNCING, NULL);
+}
+
+static void
+oma_list_chip_toggled_cb (GtkToggleButton *chip,
+			  EMailShellView *mail_shell_view)
+{
+	GtkWidget *chips = gtk_widget_get_parent (GTK_WIDGET (chip));
+	EShellSearchbar *searchbar;
+	EActionComboBox *combo;
+	gint filter;
+
+	if (g_object_get_data (G_OBJECT (chips), OMA_CHIPS_SYNCING))
+		return;
+
+	searchbar = e_mail_shell_content_get_searchbar (mail_shell_view->priv->mail_shell_content);
+	combo = e_shell_searchbar_get_filter_combo_box (searchbar);
+	filter = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (chip), OMA_CHIP_FILTER)) - 1;
+
+	/* Chips behave as one choice: un-pressing the active chip shows all. */
+	if (!gtk_toggle_button_get_active (chip))
+		filter = MAIL_FILTER_ALL_MESSAGES;
+
+	if (e_action_combo_box_get_current_value (combo) != filter)
+		e_action_combo_box_set_current_value (combo, filter);
+	else
+		oma_list_chips_sync (chips, filter);
+}
+
+static GtkWidget *
+oma_list_chips_new (EMailShellView *mail_shell_view)
+{
+	static const struct {
+		gint filter;
+		const gchar *label;
+		const gchar *icon;
+		const gchar *tooltip;
+	} chips_def[] = {
+		{ MAIL_FILTER_ALL_MESSAGES, N_("All"), NULL, N_("Show all messages") },
+		{ MAIL_FILTER_UNREAD_MESSAGES, N_("Unread"), NULL, N_("Show only unread messages") },
+		{ MAIL_FILTER_IMPORTANT_MESSAGES, NULL, "oma-mail-flag-symbolic", N_("Show only flagged messages") },
+		{ MAIL_FILTER_MESSAGES_WITH_ATTACHMENTS, NULL, "mail-attachment-symbolic", N_("Show only messages with attachments") }
+	};
+	GtkWidget *chips;
+	guint ii;
+
+	chips = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+	gtk_style_context_add_class (gtk_widget_get_style_context (chips), "oma-chips");
+
+	for (ii = 0; ii < G_N_ELEMENTS (chips_def); ii++) {
+		GtkWidget *chip;
+
+		if (chips_def[ii].label) {
+			chip = gtk_toggle_button_new_with_label (_(chips_def[ii].label));
+		} else {
+			chip = gtk_toggle_button_new ();
+			gtk_button_set_image (GTK_BUTTON (chip),
+				gtk_image_new_from_icon_name (chips_def[ii].icon, GTK_ICON_SIZE_MENU));
+			gtk_style_context_add_class (gtk_widget_get_style_context (chip), "image-button");
+		}
+
+		gtk_widget_set_tooltip_text (chip, _(chips_def[ii].tooltip));
+		gtk_widget_set_focus_on_click (chip, FALSE);
+		gtk_style_context_add_class (gtk_widget_get_style_context (chip), "oma-chip");
+		g_object_set_data (G_OBJECT (chip), OMA_CHIP_FILTER, GINT_TO_POINTER (chips_def[ii].filter + 1));
+		g_signal_connect (chip, "toggled", G_CALLBACK (oma_list_chip_toggled_cb), mail_shell_view);
+		gtk_box_pack_start (GTK_BOX (chips), chip, FALSE, FALSE, 0);
+		gtk_widget_show (chip);
+	}
+
+	return chips;
+}
+
 static void
 mail_shell_view_search_filter_changed_cb (EMailShellView *mail_shell_view)
 {
@@ -411,9 +504,13 @@ mail_shell_view_search_filter_changed_cb (EMailShellView *mail_shell_view)
 		EUIAction *action = e_shell_view_get_action (E_SHELL_VIEW (mail_shell_view), "oma-unread-filter");
 		EShellSearchbar *searchbar = e_mail_shell_content_get_searchbar (mail_shell_view->priv->mail_shell_content);
 		EActionComboBox *combo = e_shell_searchbar_get_filter_combo_box (searchbar);
+		EMailView *view = e_mail_shell_content_get_mail_view (mail_shell_view->priv->mail_shell_content);
+		GtkWidget *chips = view ? g_object_get_data (G_OBJECT (view), "oma-list-chips") : NULL;
 		if (action)
 			e_ui_action_set_state (action, g_variant_new_boolean (
 				e_action_combo_box_get_current_value (combo) == MAIL_FILTER_UNREAD_MESSAGES));
+		if (chips)
+			oma_list_chips_sync (chips, e_action_combo_box_get_current_value (combo));
 	}
 
 	if (e_shell_view_is_execute_search_blocked (E_SHELL_VIEW (mail_shell_view)))
@@ -582,6 +679,17 @@ e_mail_shell_view_private_constructed (EMailShellView *mail_shell_view)
 		combo_box, "changed",
 		G_CALLBACK (mail_shell_view_search_filter_changed_cb),
 		mail_shell_view, G_CONNECT_SWAPPED);
+
+	if (E_IS_MAIL_PANED_VIEW (mail_view)) {
+		GtkWidget *chips = oma_list_chips_new (mail_shell_view);
+
+		/* Owned by the list header; the view keeps a plain pointer. */
+		g_object_set_data (G_OBJECT (mail_view), "oma-list-chips", chips);
+		e_mail_paned_view_take_list_filters (E_MAIL_PANED_VIEW (mail_view), chips);
+		/* The combo gets its action later; start on "All", and
+		 * mail_shell_view_search_filter_changed_cb() keeps step. */
+		oma_list_chips_sync (chips, MAIL_FILTER_ALL_MESSAGES);
+	}
 
 	g_signal_connect_object (
 		folder_tree, "folder-selected",

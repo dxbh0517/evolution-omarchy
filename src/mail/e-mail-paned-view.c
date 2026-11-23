@@ -25,6 +25,12 @@
 struct _EMailPanedViewPrivate {
 	GtkWidget *paned;
 	GtkWidget *scrolled_window;
+
+	/* Omarchy list column: title header and filter chips above the list */
+	GtkWidget *list_column;
+	GtkWidget *list_title;
+	GtkWidget *list_subtitle;
+	GtkWidget *list_filters_box;
 	GtkWidget *message_list;
 	GtkWidget *preview_pane;
 	GtkWidget *preview_toolbar_box;
@@ -88,6 +94,7 @@ static GParamSpec *properties[N_PROPS] = { NULL, };
 /* Forward Declarations */
 static void e_mail_paned_view_reader_init (EMailReaderInterface *iface);
 static void mail_paned_view_responsive_size_allocate_cb (GtkWidget *widget, GtkAllocation *allocation, gpointer user_data);
+static void mail_paned_view_update_list_title (EMailPanedView *self, CamelFolder *folder);
 
 G_DEFINE_TYPE_WITH_CODE (EMailPanedView, e_mail_paned_view, E_TYPE_MAIL_VIEW,
 	G_ADD_PRIVATE (EMailPanedView)
@@ -1334,6 +1341,7 @@ mail_paned_view_dispose (GObject *object)
 
 	g_clear_object (&self->priv->paned);
 	g_clear_object (&self->priv->scrolled_window);
+	g_clear_object (&self->priv->list_column);
 	if (self->priv->row_hide_id) {
 		g_source_remove (self->priv->row_hide_id);
 		self->priv->row_hide_id = 0;
@@ -1530,6 +1538,8 @@ mail_paned_view_set_folder (EMailReader *reader,
 	default_interface = g_type_default_interface_peek (E_TYPE_MAIL_READER);
 	default_interface->set_folder (reader, folder);
 
+	mail_paned_view_update_list_title (self, folder);
+
 	if (folder == NULL)
 		goto exit;
 
@@ -1608,6 +1618,92 @@ mail_paned_view_reader_open_selected_mail (EMailReader *reader)
 	return class->open_selected_mail (paned_view);
 }
 
+/* —— List column header ——
+ * A large mailbox title with a quieter accent scope beside it
+ * ("Inbox  all accounts."), then a row for the filter chips, which the
+ * mail module supplies through e_mail_paned_view_take_list_filters(). */
+static void
+mail_paned_view_build_list_column (EMailPanedView *self)
+{
+	GtkWidget *header, *row, *widget;
+
+	widget = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+	gtk_widget_set_name (widget, "omamail-list-column");
+	self->priv->list_column = g_object_ref (widget);
+	gtk_widget_show (widget);
+
+	header = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+	gtk_widget_set_name (header, "omamail-list-header");
+	gtk_box_pack_start (GTK_BOX (self->priv->list_column), header, FALSE, FALSE, 0);
+	gtk_widget_show (header);
+
+	row = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 8);
+	gtk_box_pack_start (GTK_BOX (header), row, FALSE, FALSE, 0);
+	gtk_widget_show (row);
+
+	widget = gtk_label_new ("");
+	gtk_label_set_xalign (GTK_LABEL (widget), 0.0);
+	gtk_label_set_ellipsize (GTK_LABEL (widget), PANGO_ELLIPSIZE_END);
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "oma-list-title");
+	gtk_box_pack_start (GTK_BOX (row), widget, FALSE, FALSE, 0);
+	self->priv->list_title = widget;
+	gtk_widget_show (widget);
+
+	widget = gtk_label_new ("");
+	gtk_label_set_xalign (GTK_LABEL (widget), 0.0);
+	gtk_widget_set_valign (widget, GTK_ALIGN_BASELINE);
+	gtk_label_set_ellipsize (GTK_LABEL (widget), PANGO_ELLIPSIZE_END);
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "oma-list-subtitle");
+	gtk_box_pack_start (GTK_BOX (row), widget, TRUE, TRUE, 0);
+	self->priv->list_subtitle = widget;
+
+	gtk_widget_set_valign (self->priv->list_title, GTK_ALIGN_BASELINE);
+
+	widget = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+	gtk_widget_set_name (widget, "omamail-list-filters");
+	gtk_box_pack_start (GTK_BOX (header), widget, FALSE, FALSE, 0);
+	self->priv->list_filters_box = widget;
+	gtk_widget_set_no_show_all (widget, TRUE);
+}
+
+static void
+mail_paned_view_update_list_title (EMailPanedView *self,
+				   CamelFolder *folder)
+{
+	const gchar *title = NULL;
+	gchar *subtitle = NULL;
+
+	if (!self->priv->list_title)
+		return;
+
+	if (folder) {
+		const gchar *name = camel_folder_get_display_name (folder);
+
+		if (CAMEL_IS_VEE_FOLDER (folder)) {
+			/* Unified mailboxes read as the mailbox, across accounts. */
+			if (g_strcmp0 (name, "All Inboxes") == 0)
+				title = _("Inbox");
+			else if (g_strcmp0 (name, "All Sent") == 0)
+				title = _("Sent");
+			else
+				title = name;
+			subtitle = g_strdup (_("all accounts."));
+		} else {
+			CamelStore *store = camel_folder_get_parent_store (folder);
+
+			title = name;
+			if (store)
+				subtitle = g_strdup (camel_service_get_display_name (CAMEL_SERVICE (store)));
+		}
+	}
+
+	gtk_label_set_text (GTK_LABEL (self->priv->list_title), title ? title : "");
+	gtk_label_set_text (GTK_LABEL (self->priv->list_subtitle), subtitle ? subtitle : "");
+	gtk_widget_set_visible (self->priv->list_subtitle, subtitle && *subtitle);
+
+	g_free (subtitle);
+}
+
 static void
 mail_paned_view_constructed (GObject *object)
 {
@@ -1676,11 +1772,14 @@ mail_paned_view_constructed (GObject *object)
 
 	container = self->priv->paned;
 
+	mail_paned_view_build_list_column (self);
+	gtk_paned_pack1 (GTK_PANED (container), self->priv->list_column, TRUE, TRUE);
+
 	widget = gtk_scrolled_window_new (NULL, NULL);
 	gtk_scrolled_window_set_policy (
 		GTK_SCROLLED_WINDOW (widget),
 		GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
-	gtk_paned_pack1 (GTK_PANED (container), widget, TRUE, TRUE);
+	gtk_box_pack_start (GTK_BOX (self->priv->list_column), widget, TRUE, TRUE, 0);
 	self->priv->scrolled_window = g_object_ref (widget);
 	gtk_widget_show (widget);
 
@@ -2159,9 +2258,9 @@ e_mail_paned_view_hide_message_list_pane (EMailPanedView *view,
 	g_return_if_fail (E_IS_MAIL_PANED_VIEW (view));
 
 	if (visible)
-		gtk_widget_show (view->priv->scrolled_window);
+		gtk_widget_show (view->priv->list_column);
 	else
-		gtk_widget_hide (view->priv->scrolled_window);
+		gtk_widget_hide (view->priv->list_column);
 }
 
 gboolean
@@ -2226,6 +2325,52 @@ e_mail_paned_view_set_preview_toolbar_visible (EMailPanedView *view,
 	g_object_notify_by_pspec (G_OBJECT (view), properties[PROP_PREVIEW_TOOLBAR_VISIBLE]);
 }
 
+static void
+mail_paned_view_style_preview_toolbar (GtkToolbar *toolbar)
+{
+	gint ii, n_items = gtk_toolbar_get_n_items (toolbar);
+	gboolean seen_primary = FALSE, seen_spacer = FALSE;
+
+	for (ii = 0; ii < n_items; ii++) {
+		GtkToolItem *item = gtk_toolbar_get_nth_item (toolbar, ii);
+		GtkStyleContext *context = gtk_widget_get_style_context (GTK_WIDGET (item));
+
+		if (GTK_IS_SEPARATOR_TOOL_ITEM (item)) {
+			/* The first separator becomes a spring between the groups. */
+			gboolean spacer = !seen_spacer;
+
+			gtk_separator_tool_item_set_draw (GTK_SEPARATOR_TOOL_ITEM (item), FALSE);
+			gtk_tool_item_set_expand (item, spacer);
+			seen_spacer = TRUE;
+			continue;
+		}
+
+		if (!seen_spacer && gtk_tool_item_get_is_important (item)) {
+			gtk_style_context_add_class (context, "oma-pill");
+			if (!seen_primary)
+				gtk_style_context_add_class (context, "oma-pill-primary");
+			seen_primary = TRUE;
+		}
+	}
+}
+
+static void
+mail_paned_view_preview_toolbar_allocate_cb (GtkWidget *toolbar,
+					     GdkRectangle *allocation,
+					     gpointer user_data)
+{
+	gint n_items = gtk_toolbar_get_n_items (GTK_TOOLBAR (toolbar));
+
+	/* The UI manager fills (and, when customized, refills) the toolbar
+	 * with gtk_toolbar_insert(), which emits no "add"; restyle whenever
+	 * the set of items changes. */
+	if (GPOINTER_TO_INT (g_object_get_data (G_OBJECT (toolbar), "oma-styled-items")) == n_items)
+		return;
+
+	g_object_set_data (G_OBJECT (toolbar), "oma-styled-items", GINT_TO_POINTER (n_items));
+	mail_paned_view_style_preview_toolbar (GTK_TOOLBAR (toolbar));
+}
+
 void
 e_mail_paned_view_take_preview_toolbar (EMailPanedView *self,
 					GtkWidget *toolbar)
@@ -2235,5 +2380,37 @@ e_mail_paned_view_take_preview_toolbar (EMailPanedView *self,
 
 	gtk_widget_set_visible (toolbar, TRUE);
 
+	/* Reader action bar: labelled reply pills on the left, with Reply as
+	 * the one filled button; the quieter icon actions sit on the right. */
+	/* The toolbar's widget name is its UI-manager id, so style it
+	 * through the surrounding box instead. */
+	gtk_widget_set_name (self->priv->preview_toolbar_box, "omamail-preview-bar");
+	if (GTK_IS_TOOLBAR (toolbar)) {
+		gtk_toolbar_set_style (GTK_TOOLBAR (toolbar), GTK_TOOLBAR_BOTH_HORIZ);
+		mail_paned_view_style_preview_toolbar (GTK_TOOLBAR (toolbar));
+		g_signal_connect (toolbar, "size-allocate",
+			G_CALLBACK (mail_paned_view_preview_toolbar_allocate_cb), NULL);
+	}
+
 	gtk_box_pack_start (GTK_BOX (self->priv->preview_toolbar_box), toolbar, FALSE, FALSE, 0);
+}
+
+/**
+ * e_mail_paned_view_take_list_filters:
+ * @self: an #EMailPanedView
+ * @filters: (transfer full): a widget holding the list filter chips
+ *
+ * Places @filters in the header above the message list.
+ **/
+void
+e_mail_paned_view_take_list_filters (EMailPanedView *self,
+				     GtkWidget *filters)
+{
+	g_return_if_fail (E_IS_MAIL_PANED_VIEW (self));
+	g_return_if_fail (GTK_IS_WIDGET (filters));
+
+	gtk_box_pack_start (GTK_BOX (self->priv->list_filters_box), filters, TRUE, TRUE, 0);
+	gtk_widget_show (filters);
+	gtk_widget_set_no_show_all (self->priv->list_filters_box, FALSE);
+	gtk_widget_show (self->priv->list_filters_box);
 }

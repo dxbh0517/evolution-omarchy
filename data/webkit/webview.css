@@ -304,14 +304,34 @@ div.itip-day-event-transparent {
   opacity: 0.6;
 }
 
-/* Reader summary: big subject, sender by name, one quiet To · date line. */
-div.headers { padding: 22px 24px 18px; border-bottom: 1px solid #2a2f45; }
+/* Reader summary: big subject; sender row with initials avatar, name over
+ * address and the date at the end; then TO / CC recipient chips. */
+div.headers { padding: 22px 28px 18px; border-bottom: 1px solid #2a2f45; }
 #__evo-short-headers { width: 100%; }
-.oma-message-subject { font-size: 22px; font-weight: 700; line-height: 1.3; letter-spacing: -0.01em; margin-bottom: 12px; overflow-wrap: anywhere; }
-.oma-message-sender { font-size: 14px; font-weight: 600; line-height: 1.5; }
-.oma-message-meta { font-size: 12px; line-height: 1.5; opacity: .65; margin-top: 2px; overflow-wrap: anywhere; }
-.oma-message-date { white-space: nowrap; }
-.oma-message-sender a, .oma-message-to a { color: inherit; text-decoration: none; }
+#__evo-short-headers td.header { width: 100%; }
+.oma-message-subject { font-size: 24px; font-weight: 700; line-height: 1.25; letter-spacing: -0.015em; margin-bottom: 16px; overflow-wrap: anywhere; }
+.oma-message-from { display: flex; align-items: center; gap: 12px; }
+.oma-avatar {
+  flex: none; width: 38px; height: 38px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; letter-spacing: .02em;
+  color: hsl(var(--oma-hue, 220), 70%, 76%);
+  background: hsla(var(--oma-hue, 220), 60%, 60%, .16);
+  box-shadow: inset 0 0 0 1.5px hsla(var(--oma-hue, 220), 70%, 70%, .45);
+}
+.oma-from-text { flex: 1; min-width: 0; }
+.oma-message-sender { font-size: 14px; font-weight: 600; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oma-message-address { font-size: 12px; line-height: 1.4; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oma-message-date { flex: none; font-size: 12px; opacity: .6; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.oma-message-recipients { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 14px; font-size: 12px; }
+.oma-rcpt-label { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; opacity: .5; margin-right: 2px; }
+.oma-rcpt-label:not(:first-child) { margin-left: 8px; }
+.oma-chip {
+  flex: 0 0 auto; display: inline-block; max-width: 260px; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid rgba(169, 177, 214, .22); background: rgba(169, 177, 214, .06);
+  line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+}
+.oma-chip-more { opacity: .7; }
 /* Full-headers toggle stays reachable but out of the way until hovered. */
 button.header-collapse { border: 0; background: transparent; opacity: 0; margin-top: 6px; transition: opacity 150ms ease; }
 div.headers:hover button.header-collapse { opacity: .6; }

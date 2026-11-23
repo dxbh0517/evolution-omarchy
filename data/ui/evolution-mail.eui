@@ -5,15 +5,6 @@
       <item action='mail-jump-top' icon_only='false' label_priority='0'/>
       <item action='oma-select-mode'/>
     </start>
-    <end>
-      <item action='oma-mail-flag-toggle'/>
-      <item action='mail-archive'/>
-      <item action='mail-delete'/>
-      <item action='mail-reply-sender'/>
-      <item action='mail-reply-all'/>
-      <item action='mail-forward'/>
-      <item action='oma-unread-filter' icon_only='false' label_priority='0'/>
-    </end>
   </headerbar>
   <menu id='main-menu'>
     <submenu action='file-menu'>
@@ -118,11 +109,12 @@
       <item action='EMailReader::mail-reply-group' important="true"/>
       <item action='EMailReader::mail-forward-as-group' important="true"/>
       <separator/>
-      <item action='mail-delete'/>
+      <item action='mail-load-images'/>
+      <item action='oma-mail-flag-toggle'/>
+      <item action='mail-archive'/>
       <item action='mail-mark-junk'/>
       <item action='mail-mark-notjunk'/>
-      <item action='mail-archive'/>
-      <item action='mail-load-images'/>
+      <item action='mail-delete'/>
     </placeholder>
     <separator/>
     <placeholder id='mail-toolbar-navigation'>

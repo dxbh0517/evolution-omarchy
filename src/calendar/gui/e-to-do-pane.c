@@ -21,6 +21,9 @@
 
 #include "e-to-do-pane.h"
 
+/* Day groups as small, tracked, uppercase section labels ("TODAY"). */
+#define ETDP_SECTION_MARKUP "<span size='small' weight='bold' letter_spacing='1100' font_features='tnum=1'>%s</span>"
+
 #define MAX_TOOLTIP_DESCRIPTION_LEN 128
 
 struct _EToDoPanePrivate {
@@ -1601,7 +1604,7 @@ etdp_update_day_labels (EToDoPane *to_do_pane)
 
 		if (gtk_tree_model_get_iter (gtk_tree_row_reference_get_model (rowref), &iter, path)) {
 			struct tm tm;
-			gchar *markup;
+			gchar *markup, *upper;
 			guint date_mark;
 
 			tm = e_cal_util_icaltime_to_tm (itt);
@@ -1611,9 +1614,13 @@ etdp_update_day_labels (EToDoPane *to_do_pane)
 			date_mark = etdp_create_date_mark (itt);
 
 			if (ii == 0) {
-				markup = g_markup_printf_escaped ("<b>%s</b>", _("Today"));
+				upper = g_utf8_strup (_("Today"), -1);
+				markup = g_markup_printf_escaped (ETDP_SECTION_MARKUP, upper);
+				g_free (upper);
 			} else if (ii == 1) {
-				markup = g_markup_printf_escaped ("<b>%s</b>", _("Tomorrow"));
+				upper = g_utf8_strup (_("Tomorrow"), -1);
+				markup = g_markup_printf_escaped (ETDP_SECTION_MARKUP, upper);
+				g_free (upper);
 			} else if (ii == to_do_pane->priv->roots->len - 1) {
 				if (!to_do_pane->priv->show_no_duedate_tasks) {
 					gtk_tree_store_remove (to_do_pane->priv->tree_store, &iter);
@@ -1623,12 +1630,16 @@ etdp_update_day_labels (EToDoPane *to_do_pane)
 					break;
 				}
 
-				markup = g_markup_printf_escaped ("<b>%s</b>", _("Tasks without Due date"));
+				upper = g_utf8_strup (_("Tasks without Due date"), -1);
+				markup = g_markup_printf_escaped (ETDP_SECTION_MARKUP, upper);
+				g_free (upper);
 			} else {
 				gchar *date;
 
 				date = e_datetime_format_format_tm ("calendar", "table", DTFormatKindDate, &tm);
-				markup = g_markup_printf_escaped ("<span font_features='tnum=1'><b>%s</b></span>", date);
+				upper = g_utf8_strup (date, -1);
+				markup = g_markup_printf_escaped (ETDP_SECTION_MARKUP, upper);
+				g_free (upper);
 				g_free (date);
 			}
 
@@ -2648,6 +2659,31 @@ e_to_do_pane_get_property (GObject *object,
 }
 
 static void
+etdp_accent_bar_data_func (GtkTreeViewColumn *column,
+			   GtkCellRenderer *renderer,
+			   GtkTreeModel *model,
+			   GtkTreeIter *iter,
+			   gpointer user_data)
+{
+	GdkRGBA *bgcolor = NULL;
+	gboolean has_icon = FALSE;
+
+	gtk_tree_model_get (model, iter,
+		COLUMN_BGCOLOR, &bgcolor,
+		COLUMN_HAS_ICON_NAME, &has_icon,
+		-1);
+
+	/* Day labels have no icon and no bar. */
+	g_object_set (renderer,
+		"visible", has_icon,
+		"foreground-rgba", bgcolor,
+		NULL);
+
+	if (bgcolor)
+		gdk_rgba_free (bgcolor);
+}
+
+static void
 e_to_do_pane_constructed (GObject *object)
 {
 	EToDoPane *to_do_pane = E_TO_DO_PANE (object);
@@ -2704,17 +2740,36 @@ e_to_do_pane_constructed (GObject *object)
 	bold = pango_attr_list_new ();
 	pango_attr_list_insert (bold, pango_attr_weight_new (PANGO_WEIGHT_BOLD));
 
-	widget = gtk_label_new (_("To Do"));
+	/* "My Day": a small month view above the agenda, so the day's
+	 * appointments and tasks read in the context of the month. */
+	gtk_widget_set_name (GTK_WIDGET (grid), "omamail-my-day");
+
+	widget = gtk_label_new (_("My Day"));
 	g_object_set (G_OBJECT (widget),
-		"halign", GTK_ALIGN_CENTER,
+		"halign", GTK_ALIGN_START,
 		"hexpand", TRUE,
 		"valign", GTK_ALIGN_START,
 		"vexpand", FALSE,
-		"attributes", bold,
+		"xalign", 0.0,
 		NULL);
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "oma-my-day-title");
 	gtk_grid_attach (grid, widget, 0, 0, 1, 1);
 
 	pango_attr_list_unref (bold);
+
+	widget = e_calendar_new ();
+	g_object_set (G_OBJECT (widget),
+		"halign", GTK_ALIGN_FILL,
+		"hexpand", TRUE,
+		"valign", GTK_ALIGN_START,
+		"vexpand", FALSE,
+		NULL);
+	gtk_style_context_add_class (gtk_widget_get_style_context (widget), "oma-my-day-calendar");
+	gnome_canvas_item_set (
+		GNOME_CANVAS_ITEM (e_calendar_get_item (E_CALENDAR (widget))),
+		"move-selection-when-moving", FALSE,
+		NULL);
+	gtk_grid_attach (grid, widget, 0, 1, 1, 1);
 
 	model = GTK_TREE_MODEL (to_do_pane->priv->tree_store);
 
@@ -2743,7 +2798,7 @@ e_to_do_pane_constructed (GObject *object)
 		"vexpand", TRUE,
 		NULL);
 
-	gtk_grid_attach (grid, widget, 0, 1, 1, 1);
+	gtk_grid_attach (grid, widget, 0, 2, 1, 1);
 
 	column = gtk_tree_view_column_new ();
 
@@ -2756,6 +2811,20 @@ e_to_do_pane_constructed (GObject *object)
 		"visible", COLUMN_HAS_ICON_NAME,
 		NULL);
 
+	/* The calendar's colour is a slim bar before each entry rather than a
+	 * filled row, so a column of appointments stays calm to read. */
+	renderer = gtk_cell_renderer_text_new ();
+
+	g_object_set (G_OBJECT (renderer),
+		"text", "\u2503",
+		"xpad", 0,
+		NULL);
+
+	gtk_tree_view_column_pack_start (column, renderer, FALSE);
+
+	gtk_tree_view_column_set_cell_data_func (column, renderer,
+		etdp_accent_bar_data_func, NULL, NULL);
+
 	renderer = gtk_cell_renderer_text_new ();
 
 	g_object_set (G_OBJECT (renderer),
@@ -2766,8 +2835,6 @@ e_to_do_pane_constructed (GObject *object)
 
 	gtk_tree_view_column_set_attributes (column, renderer,
 		"markup", COLUMN_SUMMARY,
-		"background-rgba", COLUMN_BGCOLOR,
-		"foreground-rgba", COLUMN_FGCOLOR,
 		NULL);
 
 	gtk_tree_view_append_column (tree_view, column);
@@ -2796,6 +2863,9 @@ e_to_do_pane_constructed (GObject *object)
 	}
 
 	gtk_tree_view_set_headers_visible (tree_view, FALSE);
+	/* Day groups always stay open; they read as section labels. */
+	gtk_tree_view_set_show_expanders (tree_view, FALSE);
+	gtk_tree_view_set_level_indentation (tree_view, 0);
 	gtk_tree_view_set_tooltip_column (tree_view, COLUMN_TOOLTIP);
 
 	gtk_widget_show_all (GTK_WIDGET (grid));
