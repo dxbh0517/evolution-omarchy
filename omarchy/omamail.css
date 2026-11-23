@@ -768,3 +768,19 @@ tooltip {
   background-color: #283552;
   color: #e0e7ff;
 }
+
+/* Ctrl key hints: shortcut badges shown while Ctrl is held. */
+.oma-key-hint {
+  background-color: #7aa2f7;
+  color: #1a1b26;
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-size: 8pt;
+  font-weight: bold;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55);
+}
+.oma-key-hint.oma-key-hint-other {
+  background-color: #2f3549;
+  color: #c0caf5;
+  border: 1px solid rgba(122, 162, 247, 0.45);
+}

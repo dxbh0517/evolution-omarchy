@@ -1298,6 +1298,14 @@ shell_view_init_ui_data (EShellView *self)
 		show_entries, G_N_ELEMENTS (show_entries), self);
 	e_ui_manager_add_actions (self->priv->ui_manager, "custom-entries", NULL,
 		custom_entries, G_N_ELEMENTS (custom_entries), self);
+
+	/* Ctrl key hints for buttons reached through another action's shortcut. */
+	action = e_ui_manager_get_action (self->priv->ui_manager, "oma-search-toggle");
+	if (action)
+		g_object_set_data (G_OBJECT (action), E_OMA_KEY_HINT_ACCEL, (gpointer) "<Control>f");
+	action = e_ui_manager_get_action (self->priv->ui_manager, "EShellView::new-menu");
+	if (action)
+		g_object_set_data (G_OBJECT (action), E_OMA_KEY_HINT_ACCEL, (gpointer) "<Control>n");
 	e_ui_manager_add_actions_enum (self->priv->ui_manager, "custom-entries", NULL,
 		shell_switcher_style_entries, G_N_ELEMENTS (shell_switcher_style_entries), self);
 
