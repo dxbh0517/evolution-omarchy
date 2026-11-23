@@ -16,6 +16,8 @@ An unofficial Evolution 3.62.1 fork with an Apple Mail inspired layout and a Tok
 - Delete and Backspace remove the selected message. Backspace no longer runs Evolution's smart backward navigation.
 - Deletion holds the viewport through asynchronous folder updates and delayed cursor scrolling. Clicking, scrolling, or navigating in the list resumes normal movement.
 - Sidebar button or Ctrl+Shift+B folds folders into a Mail/Contacts/Calendar icon rail.
+- Default columns: the folded mailbox rail, the message list (about 27% of the mail area), the reader, and the My Day calendar at 16% of the window (under 20%). Dragged widths are still remembered.
+- Hold Ctrl to see shortcut badges over every visible button that has one: Mail/Contacts/Calendar switching (Ctrl+1…5), new message, reply, forward, flag, delete, previous/next, search and the rest. Badges for Ctrl shortcuts show only the remaining keys (“R” for Ctrl+R, “⇧R” for Shift+Ctrl+R); others such as Alt+Home appear in full on a quieter badge. Releasing Ctrl or using a shortcut hides them; with Ctrl still held they reappear for the new screen.
 - All Sent combines discovered sent folders alongside All Inboxes.
 - **Top** header button and **Alt+Home** scroll straight to the top without changing the selected message. Default wide views sort newest first.
 - Month is the calendar default, with Week/Month header controls, clearer grid lines, a soft blue today highlight and full weekend columns.

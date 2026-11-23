@@ -62,6 +62,7 @@
 #include <e-util/e-cell-tree.h>
 #include <e-util/e-cell-vbox.h>
 #include <e-util/e-oma-avatar.h>
+#include <e-util/e-oma-key-hints.h>
 #include <e-util/e-cell.h>
 #include <e-util/e-charset-combo-box.h>
 #include <e-util/e-charset.h>

@@ -75,8 +75,18 @@ e_shell_window_private_constructed (EShellWindow *shell_window)
 
 	e_shell_window_actions_constructed (shell_window);
 
-	widget = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+	/* The overlay floats Ctrl shortcut hints above the whole window. */
+	widget = gtk_overlay_new ();
+	gtk_widget_set_visible (widget, TRUE);
 	gtk_container_add (GTK_CONTAINER (shell_window), widget);
+	e_oma_key_hints_attach (window, GTK_OVERLAY (widget));
+
+	{
+		GtkWidget *overlay = widget;
+
+		widget = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+		gtk_container_add (GTK_CONTAINER (overlay), widget);
+	}
 	g_object_set (widget,
 		"halign", GTK_ALIGN_FILL,
 		"hexpand", TRUE,

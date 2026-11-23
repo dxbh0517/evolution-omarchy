@@ -92,6 +92,7 @@ set(SOURCES
 	e-cell-tree.c
 	e-cell-vbox.c
 	e-oma-avatar.c
+	e-oma-key-hints.c
 	e-cell.c
 	e-charset-combo-box.c
 	e-charset.c
@@ -377,6 +378,7 @@ set(HEADERS
 	e-cell-tree.h
 	e-cell-vbox.h
 	e-oma-avatar.h
+	e-oma-key-hints.h
 	e-cell.h
 	e-charset-combo-box.h
 	e-charset.h

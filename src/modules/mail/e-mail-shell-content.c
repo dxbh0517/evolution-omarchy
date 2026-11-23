@@ -69,7 +69,7 @@ mail_shell_content_map_setting_to_proportion_cb (GValue *value,
 						 gpointer user_data)
 {
 	gint stored;
-	gdouble proportion = 0.15;
+	gdouble proportion = 0.16;
 
 	stored = g_variant_get_int32 (variant);
 

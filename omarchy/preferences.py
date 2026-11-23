@@ -11,21 +11,23 @@ if not backup.exists():
     backup.chmod(0o600)
 # Calm chrome: one reader action bar (Reply pills) instead of a main toolbar,
 # and a "My Day" column (month, today/tomorrow, tasks) on the right.
-# Keep the status bar for sync feedback. Folder rail slightly wider for labels.
+# Keep the status bar for sync feedback. Columns: folded mailbox rail, message
+# list (~27% of the mail area), reader, and My Day at 16% (kept under 20%).
+# folder-bar-width is the expanded sidebar width when unfolded (Ctrl+Shift+B).
 defaults = {
     'org.gnome.evolution.shell': {
         'use-header-bar': True, 'icon-only-buttons-in-header-bar': True,
         'prefer-symbolic-icons': 'yes', 'toolbar-icon-size': 'small',
         'menubar-visible': False, 'toolbar-visible': False,
-        'sidebar-visible': True, 'statusbar-visible': True,
+        'sidebar-visible': False, 'statusbar-visible': True,
         'buttons-visible': True, 'buttons-style': 'icons',
         'buttons-hide': [], 'folder-bar-width': 248,
     },
     'org.gnome.evolution.mail': {
-        'layout': 1, 'hpaned-size': 1420000, 'global-view-setting': False,
+        'layout': 1, 'hpaned-size': 1730000, 'hpaned-size-sub': 1730000, 'global-view-setting': False,
         'show-subject-above-sender': False, 'show-email': False,
         'show-preview-toolbar': True, 'show-to-do-bar': True,
-        'to-do-bar-width': 1170000,
+        'to-do-bar-width': 1160000, 'to-do-bar-width-sub': 1160000,
         'show-sender-photo': False, 'headers-collapsed': True,
         'show-all-headers': False, 'show-attachment-bar': True,
         'preview-unset-html-colors': True,
