@@ -109,7 +109,6 @@
       <item action='EMailReader::mail-reply-group' important="true"/>
       <item action='EMailReader::mail-forward-as-group' important="true"/>
       <separator/>
-      <item action='mail-load-images'/>
       <item action='oma-mail-flag-toggle'/>
       <item action='mail-archive'/>
       <item action='mail-mark-junk'/>

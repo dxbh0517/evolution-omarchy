@@ -100,4 +100,14 @@ if shutil.which('gtk-update-icon-cache'):
     subprocess.run(['gtk-update-icon-cache', '-f', '-t', str(home / '.local/share/icons/hicolor')], check=True)
 if shutil.which('update-desktop-database'):
     subprocess.run(['update-desktop-database', str(apps)], check=True)
+# Near real-time sync: IMAP IDLE / EWS listen plus a 1-minute poll fallback.
+# Backs up each changed account under ~/.local/share/evolution-omarchy/backups/.
+try:
+    subprocess.run(
+        ['python3', str(repo / 'omarchy/refresh.py'), '--ensure-realtime'],
+        check=False,
+    )
+except OSError as error:
+    print(f'Could not enable real-time mail sync defaults: {error}')
+
 print('Installed. Launch ~/.local/bin/evolution or the Evolution desktop entry.')

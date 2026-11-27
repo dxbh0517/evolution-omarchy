@@ -143,7 +143,6 @@
       <item action='mail-mark-junk'/>
       <item action='mail-mark-notjunk'/>
       <item action='mail-archive'/>
-      <item action='mail-load-images'/>
     </placeholder>
     <separator/>
     <placeholder id='mail-toolbar-navigation'>
@@ -164,7 +163,6 @@
       <item action='mail-mark-junk'/>
       <item action='mail-mark-notjunk'/>
       <item action='mail-archive'/>
-      <item action='mail-load-images'/>
     </placeholder>
     <separator/>
     <placeholder id='mail-toolbar-navigation'>

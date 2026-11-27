@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -284,7 +285,9 @@ static gint	on_click			(ETree *tree,
 						 GdkEvent *event,
 						 MessageList *message_list);
 
-#define OMA_PAGE_SIZE 50
+/* Initial window and each infinite-scroll step. Larger pages mean fewer
+ * full rebuilds while scrolling large mailboxes. */
+#define OMA_PAGE_SIZE 100
 
 static void	oma_message_list_notify_vadjustment_cb (MessageList *message_list, GParamSpec *param, gpointer user_data);
 static void	mail_regen_list			(MessageList *message_list,
@@ -6278,56 +6281,110 @@ typedef struct {
 } OmaUidDate;
 
 static gint
-oma_uid_date_newest_first (gconstpointer a,
+oma_uid_date_oldest_first (gconstpointer a,
                            gconstpointer b)
 {
 	gint64 da = ((const OmaUidDate *) a)->date, db = ((const OmaUidDate *) b)->date;
 
-	return da < db ? 1 : (da > db ? -1 : 0);
+	return da < db ? -1 : (da > db ? 1 : 0);
+}
+
+static void
+oma_uid_date_heap_sift_down (OmaUidDate *heap,
+                             guint len,
+                             guint index)
+{
+	for (;;) {
+		guint left = index * 2 + 1, right = left + 1, smallest = index;
+
+		if (left < len && heap[left].date < heap[smallest].date)
+			smallest = left;
+		if (right < len && heap[right].date < heap[smallest].date)
+			smallest = right;
+		if (smallest == index)
+			break;
+
+		{
+			OmaUidDate tmp = heap[index];
+
+			heap[index] = heap[smallest];
+			heap[smallest] = tmp;
+		}
+		index = smallest;
+	}
 }
 
 /* Keep only the newest @limit UIDs; the dropped tail is freed by the
- * array's own free function. Runs in the regen thread. */
+ * array's own free function. Runs in the regen thread.
+ *
+ * Uses a size-@limit min-heap (O(n log k)) so large folders do not pay for
+ * a full sort or prepare_fetch_all of every message info. */
 static void
 oma_limit_uids (CamelFolder *folder,
                 GPtrArray *uids,
                 guint limit,
                 GCancellable *cancellable)
 {
-	GArray *dated;
-	guint ii;
+	OmaUidDate *heap;
+	guint ii, heap_len = 0;
 
 	if (limit == 0 || uids->len <= limit)
 		return;
 
-	camel_folder_summary_prepare_fetch_all (camel_folder_get_folder_summary (folder), NULL);
+	heap = g_new (OmaUidDate, limit);
 
-	dated = g_array_sized_new (FALSE, FALSE, sizeof (OmaUidDate), uids->len);
 	for (ii = 0; ii < uids->len; ii++) {
 		OmaUidDate item = { uids->pdata[ii], 0 };
-		CamelMessageInfo *info = camel_folder_get_message_info (folder, item.uid);
+		CamelMessageInfo *info;
 
+		if ((ii & 0x3ff) == 0 && g_cancellable_is_cancelled (cancellable)) {
+			g_free (heap);
+			return;
+		}
+
+		info = camel_folder_get_message_info (folder, item.uid);
 		if (info) {
 			item.date = camel_message_info_get_date_sent (info);
 			if (item.date <= 0)
 				item.date = camel_message_info_get_date_received (info);
 			g_object_unref (info);
 		}
-		g_array_append_val (dated, item);
 
-		if ((ii & 0x3ff) == 0 && g_cancellable_is_cancelled (cancellable))
-			break;
+		if (heap_len < limit) {
+			heap[heap_len] = item;
+			heap_len++;
+			/* Sift up. */
+			{
+				guint child = heap_len - 1;
+
+				while (child > 0) {
+					guint parent = (child - 1) / 2;
+
+					if (heap[parent].date <= heap[child].date)
+						break;
+
+					{
+						OmaUidDate tmp = heap[parent];
+
+						heap[parent] = heap[child];
+						heap[child] = tmp;
+					}
+					child = parent;
+				}
+			}
+		} else if (item.date > heap[0].date) {
+			heap[0] = item;
+			oma_uid_date_heap_sift_down (heap, heap_len, 0);
+		}
 	}
 
-	if (dated->len == uids->len) {
-		g_array_sort (dated, oma_uid_date_newest_first);
-		/* Same pointer set, new order, so ownership is unchanged. */
-		for (ii = 0; ii < dated->len; ii++)
-			uids->pdata[ii] = g_array_index (dated, OmaUidDate, ii).uid;
-		g_ptr_array_set_size (uids, limit);
-	}
-
-	g_array_free (dated, TRUE);
+	/* Oldest-first so the array ends newest-last; camel_folder_sort_uids
+	 * will reorder to the user's sort preference next. */
+	qsort (heap, heap_len, sizeof (OmaUidDate), oma_uid_date_oldest_first);
+	for (ii = 0; ii < heap_len; ii++)
+		uids->pdata[ii] = heap[ii].uid;
+	g_ptr_array_set_size (uids, heap_len);
+	g_free (heap);
 }
 
 static void
