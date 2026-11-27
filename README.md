@@ -37,21 +37,29 @@ Message dividers begin at the text column, the redundant column heading is hidde
 
 This branch merges upstream Evolution 3.62.1 while preserving the Omarchy changes. It requires Evolution Data Server 3.62.1 or newer and matching EWS/Microsoft365 modules; the existing 3.60.2 installation must not be overwritten with a mixed-version build. The `omarchy-3.60` branch preserves the previous working 3.60.2 build as a rollback baseline. The new local stack has passed the checks described below.
 
-The header now exposes **Check Mail**, a receive-only action that leaves queued outgoing messages alone. The optional appearance defaults enable Evolution's native status/activity bar. No custom timer, credential handler, or replacement synchronization engine is introduced.
+The header now exposes **Check Mail**, a receive-only action that leaves queued outgoing messages alone. The optional appearance defaults enable Evolution's native status/activity bar. No custom timer, credential handler, or replacement synchronization engine is introduced. Mail sync relies on Camel IMAP IDLE (and EWS listen-notifications) with a short refresh fallback so new messages appear without waiting for a manual check.
 
-Inspect enabled remote accounts' polling without changing anything:
+Inspect enabled remote accounts' polling and push settings without changing anything:
 
 ```sh
 python3 omarchy/refresh.py
 ```
 
-Explicitly opt into one-minute checks:
+Enable real-time sync (IMAP IDLE / EWS listen + a one-minute refresh fallback). Install runs this automatically:
+
+```sh
+python3 omarchy/refresh.py --ensure-realtime
+```
+
+Or set only the polling interval:
 
 ```sh
 python3 omarchy/refresh.py --apply-minutes 1
 ```
 
-The tool backs up each changed account source privately outside the checkout before using Evolution's source registry to save the interval. It excludes local folders, search folders and RSS; calendar choices and credentials are preserved. Backups contain private configuration and must not be published.
+The tool backs up each changed account source privately outside the checkout before using Evolution's source registry to save the interval and push flags. It excludes local folders, search folders and RSS; calendar choices and credentials are preserved. Backups contain private configuration and must not be published.
+
+The message list loads the newest 100 messages first and grows by 100 as you scroll, using a top-N selection so large mailboxes do not fully sort on every refresh. Remote images use the in-message header control (and View → Load Images); the duplicate toolbar button is omitted.
 
 ### Isolated dependency build
 
