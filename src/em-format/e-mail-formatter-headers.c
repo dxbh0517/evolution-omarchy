@@ -254,14 +254,10 @@ format_short_headers (EMailFormatter *formatter,
 		icon_height = 16;
 	}
 
+	/* Remote-content / Load Images lives on the preview toolbar
+	 * (mail-load-images), not as an in-header WebKit image button. */
 	g_string_append (buffer, "<td align=\"right\" valign=\"top\">");
 	g_string_append_printf (buffer,
-		"<img src=\"gtk-stock://insert-image/?size=%d\" width=\"%dpx\" height=\"%dpx\""
-		" id=\"__evo-remote-content-img-small\" class=\"__evo-remote-content-img\" title=\"%s\" style=\"cursor:pointer;\" hidden/>",
-		GTK_ICON_SIZE_MENU, icon_width, icon_height,
-		_("Remote content download had been blocked for this message."));
-	g_string_append_printf (buffer,
-		"&nbsp;"
 		"<img src=\"gtk-stock://stock_signature/?size=%d\" width=\"%dpx\" height=\"%dpx\""
 		" id=\"__evo-autocrypt-import-img-small\" class=\"__evo-autocrypt-import-img\" title=\"%s\" style=\"cursor:pointer;\" hidden/>",
 		GTK_ICON_SIZE_MENU, icon_width, icon_height,
@@ -630,14 +626,10 @@ format_full_headers (EMailFormatter *formatter,
 		icon_height = 24;
 	}
 
+	/* Remote-content / Load Images lives on the preview toolbar
+	 * (mail-load-images), not as an in-header WebKit image button. */
 	g_string_append (buffer, "<td align=\"right\" valign=\"top\">");
 	g_string_append_printf (buffer,
-		"<img src=\"gtk-stock://insert-image/?size=%d\" width=\"%dpx\" height=\"%dpx\""
-		" id=\"__evo-remote-content-img-large\" class=\"__evo-remote-content-img\" title=\"%s\" style=\"cursor:pointer;\" hidden/>",
-		GTK_ICON_SIZE_LARGE_TOOLBAR, icon_width, icon_height,
-		_("Remote content download had been blocked for this message."));
-	g_string_append_printf (buffer,
-		"&nbsp;"
 		"<img src=\"gtk-stock://stock_signature/?size=%d\" width=\"%dpx\" height=\"%dpx\""
 		" id=\"__evo-autocrypt-import-img-large\" class=\"__evo-autocrypt-import-img\" title=\"%s\" style=\"cursor:pointer;\" hidden/>",
 		GTK_ICON_SIZE_LARGE_TOOLBAR, icon_width, icon_height,
