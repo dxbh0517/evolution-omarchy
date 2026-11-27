@@ -4262,10 +4262,18 @@ mail_reader_message_loaded_cb (CamelFolder *folder,
 
 	if (message != NULL) {
 		CamelMessageInfo *mi;
+		CamelFolder *list_folder;
 
-		mail_reader_manage_followup_flag (reader, folder, message_uid);
+		/* Follow-up / list UIDs stay on the reader folder (often a
+		 * vfolder). The async folder may be the underlying store
+		 * folder used only to fetch the MIME content. */
+		list_folder = e_mail_reader_ref_folder (reader);
+		if (list_folder == NULL)
+			list_folder = g_object_ref (folder);
 
-		mi = camel_folder_get_message_info (folder, message_uid);
+		mail_reader_manage_followup_flag (reader, list_folder, message_uid);
+
+		mi = camel_folder_get_message_info (list_folder, message_uid);
 		if (mi) {
 			if (camel_util_fill_message_info_user_headers (mi, camel_medium_get_headers (CAMEL_MEDIUM (message))))
 				gtk_widget_queue_draw (message_list);
@@ -4276,6 +4284,8 @@ mail_reader_message_loaded_cb (CamelFolder *folder,
 		g_signal_emit (
 			reader, signals[MESSAGE_LOADED], 0,
 			message_uid, message);
+
+		g_clear_object (&list_folder);
 	}
 
 exit:
@@ -4362,14 +4372,33 @@ mail_reader_message_selected_timeout_cb (gpointer user_data)
 			closure = g_slice_new0 (EMailReaderClosure);
 			closure->activity = activity;
 			closure->reader = g_object_ref (reader);
+			/* Keep the list/vfolder UID for UI matching; fetch below
+			 * may use the underlying folder's real UID. */
 			closure->message_uid = g_strdup (cursor_uid);
 
 			folder = e_mail_reader_ref_folder (reader);
 
-			camel_folder_get_message (
-				folder, cursor_uid, G_PRIORITY_DEFAULT,
-				cancellable, (GAsyncReadyCallback)
-				mail_reader_message_loaded_cb, closure);
+			{
+				gchar *real_uid = NULL;
+				const gchar *fetch_uid = cursor_uid;
+
+				/* All Inboxes and other search folders store
+				 * synthetic UIDs. Fetching through the vfolder
+				 * races with folder refresh and often fails with
+				 * "Unable to retrieve message." Resolve to the
+				 * real store folder first, like reply/archive. */
+				if (mail_reader_replace_vee_folder_with_real (
+					&folder, cursor_uid, &real_uid) &&
+				    real_uid != NULL)
+					fetch_uid = real_uid;
+
+				camel_folder_get_message (
+					folder, fetch_uid, G_PRIORITY_DEFAULT,
+					cancellable, (GAsyncReadyCallback)
+					mail_reader_message_loaded_cb, closure);
+
+				g_free (real_uid);
+			}
 
 			g_clear_object (&folder);
 

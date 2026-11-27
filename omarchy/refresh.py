@@ -109,8 +109,9 @@ parser.add_argument(
     '--ensure-realtime',
     action='store_true',
     help=(
-        'enable IMAP IDLE / EWS listen-notifications and set a 1-minute '
-        'refresh fallback so mail stays near real-time if push drops'
+        'enable IMAP IDLE / EWS listen-notifications and a gentle refresh '
+        'fallback (10 minutes when push is on, 1 minute when it is not). '
+        'A 1-minute poll on every folder fights IDLE and causes retrieve failures.'
     ),
 )
 args = parser.parse_args()
@@ -119,8 +120,8 @@ if args.apply_minutes is not None and not 1 <= args.apply_minutes <= 60:
     parser.error('interval must be between 1 and 60 minutes')
 
 apply_minutes = args.apply_minutes
-if args.ensure_realtime and apply_minutes is None:
-    apply_minutes = 1
+# Default fallback for --ensure-realtime is chosen per-account below once
+# we know whether push (IDLE / listen) is available.
 
 registry = EDataServer.SourceRegistry.new_sync(None)
 accounts = mail_accounts(registry)
@@ -148,11 +149,6 @@ for index, source in enumerate(accounts, 1):
         path.touch(mode=0o600)
         path.write_text(data)
 
-        if apply_minutes is not None:
-            refresh.set_enabled(True)
-            refresh.set_interval_minutes(apply_minutes)
-            notes.append(f'interval={apply_minutes}m')
-
         if args.ensure_realtime:
             if ensure_push(source):
                 notes.append('push enabled')
@@ -162,6 +158,29 @@ for index, source in enumerate(accounts, 1):
                     notes.append('push already on')
                 elif prop:
                     notes.append(f'could not set {prop}')
+
+            # Prefer inbox-focused polling when IDLE is carrying real-time.
+            backend = source.get_extension('Mail Account').get_backend_name()
+            if backend == 'imapx':
+                imapx = source.get_extension('Imapx Backend')
+                if imapx is not None:
+                    try:
+                        if imapx.get_property('check-all'):
+                            imapx.set_property('check-all', False)
+                            notes.append('check-all=off')
+                    except Exception:
+                        pass
+
+        minutes = apply_minutes
+        if minutes is None and args.ensure_realtime:
+            prop, enabled = push_state(source)
+            # IDLE/listen already delivers new mail; poll only as a safety net.
+            minutes = 10 if enabled else 1
+
+        if minutes is not None:
+            refresh.set_enabled(True)
+            refresh.set_interval_minutes(minutes)
+            notes.append(f'interval={minutes}m')
 
         source.write_sync(None)
 

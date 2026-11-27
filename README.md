@@ -45,7 +45,7 @@ Inspect enabled remote accounts' polling and push settings without changing anyt
 python3 omarchy/refresh.py
 ```
 
-Enable real-time sync (IMAP IDLE / EWS listen + a one-minute refresh fallback). Install runs this automatically:
+Enable real-time sync (IMAP IDLE / EWS listen, with a 10-minute poll fallback when push is on). Install runs this automatically:
 
 ```sh
 python3 omarchy/refresh.py --ensure-realtime
@@ -59,7 +59,7 @@ python3 omarchy/refresh.py --apply-minutes 1
 
 The tool backs up each changed account source privately outside the checkout before using Evolution's source registry to save the interval and push flags. It excludes local folders, search folders and RSS; calendar choices and credentials are preserved. Backups contain private configuration and must not be published.
 
-The message list loads the newest 100 messages first and grows by 100 as you scroll, using a top-N selection so large mailboxes do not fully sort on every refresh. Remote images use the in-message header control (and View → Load Images); the duplicate toolbar button is omitted.
+The message list loads the newest 100 messages first and grows by 100 as you scroll, using a top-N selection so large mailboxes do not fully sort on every refresh. Load Images sits on the reader action bar with Reply and the other message actions (also under View → Load Images), not as an in-header WebKit control.
 
 ### Isolated dependency build
 

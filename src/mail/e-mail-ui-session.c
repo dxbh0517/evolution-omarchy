@@ -1036,10 +1036,18 @@ static void
 mail_ui_session_refresh_service (EMailSession *session,
                                  CamelService *service)
 {
-	if (!camel_application_is_exiting &&
-	    camel_session_get_online (CAMEL_SESSION (session))) {
-		mail_receive_service (service);
-	}
+	/* Guard against a stale service pointer (account removed mid-tick)
+	 * and against calling into Camel while the process is exiting. */
+	if (camel_application_is_exiting)
+		return;
+
+	if (!E_IS_MAIL_SESSION (session) || !CAMEL_IS_SERVICE (service))
+		return;
+
+	if (!camel_session_get_online (CAMEL_SESSION (session)))
+		return;
+
+	mail_receive_service (service);
 }
 
 static EMVFolderContext *
