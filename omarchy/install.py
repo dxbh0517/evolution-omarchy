@@ -103,8 +103,10 @@ if shutil.which('update-desktop-database'):
 # Near real-time sync: IMAP IDLE / EWS listen plus a 1-minute poll fallback.
 # Backs up each changed account under ~/.local/share/evolution-omarchy/backups/.
 try:
+    # Prefer the system interpreter: mise/user pythons often lack PyGObject.
+    refresh_python = '/usr/bin/python3' if Path('/usr/bin/python3').exists() else 'python3'
     subprocess.run(
-        ['python3', str(repo / 'omarchy/refresh.py'), '--ensure-realtime'],
+        [refresh_python, str(repo / 'omarchy/refresh.py'), '--ensure-realtime'],
         check=False,
     )
 except OSError as error:
