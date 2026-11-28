@@ -6280,15 +6280,6 @@ typedef struct {
 	gint64 date;
 } OmaUidDate;
 
-static gint
-oma_uid_date_oldest_first (gconstpointer a,
-                           gconstpointer b)
-{
-	gint64 da = ((const OmaUidDate *) a)->date, db = ((const OmaUidDate *) b)->date;
-
-	return da < db ? -1 : (da > db ? 1 : 0);
-}
-
 static void
 oma_uid_date_heap_sift_down (OmaUidDate *heap,
                              guint len,
@@ -6378,12 +6369,36 @@ oma_limit_uids (CamelFolder *folder,
 		}
 	}
 
-	/* Oldest-first so the array ends newest-last; camel_folder_sort_uids
-	 * will reorder to the user's sort preference next. */
-	qsort (heap, heap_len, sizeof (OmaUidDate), oma_uid_date_oldest_first);
-	for (ii = 0; ii < heap_len; ii++)
-		uids->pdata[ii] = heap[ii].uid;
-	g_ptr_array_set_size (uids, heap_len);
+	/* The array owns its UID strings (it has a free function), so the
+	 * kept pointers must be moved, never copied: partition them to the
+	 * front by swapping, so the tail holds exactly the dropped UIDs and
+	 * g_ptr_array_set_size() frees only those. Copying kept pointers over
+	 * the front left originals in the tail, which were then freed while
+	 * still referenced by the list, producing garbage UIDs ("No such
+	 * message ... in All Inboxes") and blank rows.
+	 *
+	 * Order does not matter here: camel_folder_sort_uids and the tree's
+	 * own sort reorder the result next. */
+	{
+		GHashTable *kept = g_hash_table_new (g_direct_hash, g_direct_equal);
+		guint write = 0;
+
+		for (ii = 0; ii < heap_len; ii++)
+			g_hash_table_add (kept, heap[ii].uid);
+
+		for (ii = 0; ii < uids->len; ii++) {
+			if (g_hash_table_contains (kept, uids->pdata[ii])) {
+				gpointer tmp = uids->pdata[write];
+
+				uids->pdata[write] = uids->pdata[ii];
+				uids->pdata[ii] = tmp;
+				write++;
+			}
+		}
+
+		g_hash_table_destroy (kept);
+		g_ptr_array_set_size (uids, write);
+	}
 	g_free (heap);
 }
 
